@@ -1,9 +1,7 @@
-from mcp_server.tools.registry import registry
+from mcp_server.app import mcp
 
 
-@registry.register("list_catalogs")
-def list_catalogs():
-    # stub for now
-    return {
-        "catalogs": ["main", "analytics", "system"]
-    }
+@mcp.tool()
+def list_catalogs() -> dict:
+    """List available Databricks catalogs. (Stub — returns hardcoded values.)"""
+    return {"catalogs": ["main", "analytics", "system"]}

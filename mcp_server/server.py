@@ -1,22 +1,10 @@
-from fastapi import FastAPI
-from mcp_server.tools.registry import registry
-from mcp_server.tools import basic_tools
+from dotenv import load_dotenv
 
-print("TOOLS REGISTERED:", registry.list_tools())  # <-- DEBUG LINE HERE
+from mcp_server.app import mcp
+from mcp_server.tools import basic_tools  # noqa: F401 — imported for side-effect of registering tools
 
-app = FastAPI(title="Databricks AI Steward MCP Server")
-
-
-@app.get("/")
-def health():
-    return {"status": "ok"}
+load_dotenv()
 
 
-@app.get("/tools")
-def list_tools():
-    return registry.list_tools()
-
-
-@app.post("/run/{tool_name}")
-def run_tool(tool_name: str, payload: dict):
-    return registry.run(tool_name, **payload)
+if __name__ == "__main__":
+    mcp.run()
