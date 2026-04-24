@@ -36,6 +36,13 @@ How a request moves through the system, from Claude Code down to the tool functi
                 │
                 ▼
 ┌──────────────────────────────────────────────────────────────┐
+│ @safe_tool() guard  (mcp_server/app.py)                      │
+│   • try/except around the tool body → structured error       │
+│   • JSON-serialize return → reject if > MAX_RESPONSE_BYTES  │
+└──────────────────────────────────────────────────────────────┘
+                │
+                ▼
+┌──────────────────────────────────────────────────────────────┐
 │ Tool function — e.g. mcp_server/tools/basic_tools.py         │
 │   def list_catalogs() -> dict: ...                           │
 │                                                              │
@@ -85,6 +92,16 @@ This is why `server.py` contains seemingly-unused imports marked `# noqa: F401`.
 (There are auto-discovery patterns — `pkgutil.walk_packages` over `mcp_server.tools`, for example — that would eliminate this gotcha. They're worth considering once the tool count grows, but add magic that makes the import graph harder to reason about when debugging. For now: explicit imports.)
 
 ---
+
+## Reliability guards (already in place)
+
+Three protections live in `mcp_server/app.py` because a stdio MCP server has no supervisor — a single uncaught exception crashes the process and the client session dies:
+
+- **stderr-only logging.** `logging.basicConfig(stream=sys.stderr, ...)` runs before any tool module is imported. Any library that defaults to stdout logging would otherwise corrupt the MCP JSON-RPC stream; pinning the root logger early prevents that. Level tunable via `MCP_LOG_LEVEL`.
+- **`@safe_tool()` decorator.** Wraps `@mcp.tool()` with a try/except that converts any exception into `{"error": {"type": ..., "message": ...}}`. Works for both sync and async tool functions. Uses `functools.wraps` so FastMCP still sees the original signature and derives the right JSON schema.
+- **Response size cap.** Before returning, the guard JSON-serializes the tool's output and rejects anything over `MAX_RESPONSE_BYTES` (default 256 KB, override via env). The serialization itself is also wrapped in a broad except — some objects' `__repr__` can raise during encoding, which would otherwise escape into the event loop and kill the server.
+
+Not in place yet (deferred until the Databricks client design lands): per-tool timeouts and concurrent-call isolation. Both are cleaner to design alongside the client than to retrofit.
 
 ## Where future layers plug in
 

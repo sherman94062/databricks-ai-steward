@@ -16,16 +16,17 @@ Dependencies are declared in `pyproject.toml`. The venv at `.venv/` uses Python 
 source .venv/bin/activate
 
 # Sync deps after pulling or editing pyproject.toml
-pip install -e .
+pip install -e '.[dev]'   # omit [dev] for runtime-only
 
 # Run the MCP server (stdio transport — blocks waiting for a client)
 python -m mcp_server.server
 
 # Register with Claude Code
 claude mcp add databricks-steward -- python -m mcp_server.server
-```
 
-No test runner is installed yet; `tests/` is empty.
+# Run tests
+pytest tests/
+```
 
 ## Architecture
 
@@ -35,17 +36,29 @@ No test runner is installed yet; `tests/` is empty.
 
 ### Adding a tool
 
-1. Write a decorated function in a module under `mcp_server/tools/`:
+1. Write a decorated function in a module under `mcp_server/tools/`, using `@safe_tool()` from `mcp_server.app`:
 
    ```python
-   from mcp_server.app import mcp
+   from mcp_server.app import safe_tool
 
-   @mcp.tool()
+   @safe_tool()
    def my_tool(arg: str) -> dict:
        """Docstring — FastMCP uses this as the tool description."""
        ...
    ```
 
+   `safe_tool` wraps `@mcp.tool()` with shared exception-catching and response-size guards (see next section). Prefer it over raw `@mcp.tool()` unless you have a specific reason to bypass the guards.
+
 2. Import the module in `mcp_server/server.py` so the decorator runs at startup. Forgetting this import is the main footgun: the tool won't register, and there will be no error. All tool-module imports in `server.py` should be marked `# noqa: F401` since they're side-effect imports.
 
 FastMCP derives each tool's JSON schema from the function's type hints and docstring, so type your parameters and return values accurately.
+
+### Reliability guards
+
+`mcp_server/app.py` applies three process-level protections because a stdio MCP server dies hard on uncaught errors:
+
+- **Logs go to stderr.** Writing to stdout corrupts the JSON-RPC stream; `logging.basicConfig` pins the root logger to stderr. Never use `print()` in tool code — it will silently break the session. Level tunable via `MCP_LOG_LEVEL` env var.
+- **Exceptions in tool code become structured error responses.** `@safe_tool()` catches anything a tool raises and returns `{"error": {"type": ..., "message": ...}}` rather than letting the exception escape to the event loop.
+- **Oversized responses are rejected.** Serialized tool returns larger than `MAX_RESPONSE_BYTES` (default 256 KB, override via `MCP_MAX_RESPONSE_BYTES`) are replaced with a `ResponseTooLarge` error. This protects both the server and the client's context window.
+
+Tests in `tests/test_guards.py` cover each guard; run them with `pytest tests/`.
