@@ -91,6 +91,19 @@ async def hangs_forever_async_guarded() -> dict:
     return {"ok": True}
 
 
+async def _hang_async() -> dict:
+    await asyncio.sleep(300)
+    return {"ok": True}
+
+
+# Same hang, but with a 0.5s server-side timeout. Demonstrates that
+# _guard's per-tool timeout self-cancels the coroutine even when the
+# client never sends notifications/cancelled.
+hangs_forever_async_with_timeout_guarded = _guard(_hang_async, timeout_s=0.5)
+hangs_forever_async_with_timeout_guarded.__name__ = "hangs_forever_async_with_timeout_guarded"
+mcp.tool()(hangs_forever_async_with_timeout_guarded)
+
+
 # ---- introspection -----------------------------------------------------
 @mcp.tool()
 @_guard
@@ -101,6 +114,57 @@ async def task_count() -> dict:
     me = asyncio.current_task()
     alive = [t for t in asyncio.all_tasks() if t is not me and not t.done()]
     return {"count": len(alive)}
+
+
+# ---- size-guard boundary ------------------------------------------------
+@mcp.tool()
+@_guard
+def payload_of_size_guarded(n: int) -> dict:
+    """Returns a payload whose JSON serialization is exactly n+11 bytes.
+    Caller chooses n to probe the size guard at, just under, or just over
+    MAX_RESPONSE_BYTES."""
+    return {"data": "x" * n}
+
+
+# ---- nesting depth ------------------------------------------------------
+@mcp.tool()
+@_guard
+def deeply_nested_guarded(depth: int) -> Any:
+    """Returns a list nested `depth` levels deep. json.dumps uses recursion
+    and Python's default recursion limit is 1000."""
+    out: Any = []
+    inner = out
+    for _ in range(depth):
+        new: list = []
+        inner.append(new)
+        inner = new
+    return {"nested": out}
+
+
+# ---- circular reference -------------------------------------------------
+@mcp.tool()
+@_guard
+def circular_ref_guarded() -> Any:
+    """Returns a dict with a self-reference. json.dumps should raise
+    ValueError('Circular reference detected')."""
+    d: dict = {"name": "self"}
+    d["me"] = d
+    return d
+
+
+# ---- weird scalar types -------------------------------------------------
+@mcp.tool()
+@_guard
+def returns_nan_guarded() -> dict:
+    """json.dumps emits 'NaN' by default — not valid JSON per the spec."""
+    return {"value": float("nan")}
+
+
+@mcp.tool()
+@_guard
+def returns_bytes_guarded() -> dict:
+    """bytes is not JSON-serializable; falls through to default=str."""
+    return {"data": b"binary content"}
 
 
 # ---- unserializable return ---------------------------------------------
