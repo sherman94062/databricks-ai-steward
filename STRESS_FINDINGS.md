@@ -13,7 +13,7 @@ that have landed are noted; the rest are open.
 | A1 | Sync tool blocks the event loop, wedging the entire session | High | **Fixed** — `safe_tool` now refuses sync tools |
 | A.1 | Client cancellation does not propagate; cancelled async calls leak server-side coroutines | High | **Mitigated** — per-tool server-side timeout; upstream bug remains |
 | B2 | Sync hang prevents clean shutdown on stdin EOF (requires SIGKILL) | Medium | Inherits A1 fix |
-| C1 | SIGINT is swallowed during in-flight calls (SIGTERM works) | Medium | Open — clients should signal with SIGTERM |
+| C1 | SIGINT is swallowed during in-flight calls (SIGTERM works) | Medium | **Mitigated** — lifecycle handler catches both signals |
 | D | A single sync slow call kills 100% of concurrent fast calls; async slow adds ~3 ms | High | Inherits A1 fix |
 | E2 | `_cap_response`'s json.dumps validation diverges from FastMCP's wire encoding for deeply nested objects | Low | Open — guard's promise leaks |
 
@@ -39,6 +39,7 @@ python -m stress.probe_d_blast_radius    # D
 
 # Boundary conditions
 python -m stress.probe_e_boundary        # E1–E5
+python -m stress.probe_restart           # graceful-shutdown contract
 ```
 
 ---
@@ -157,10 +158,10 @@ stdin closes the loop cannot reach its EOF-detection / shutdown logic.
 
 ---
 
-## C1 — SIGINT is not honored mid-call
+## C1 — SIGINT is not honored mid-call (mitigated)
 
-**Symptom.** Sending a signal to the server subprocess during a hanging
-tool call:
+**Original symptom.** Sending a signal to the server subprocess during a
+hanging tool call, before the lifecycle handler:
 
 | Tool kind | Signal | Exit code | Time | Needed SIGKILL |
 |---|---|---|---|---|
@@ -169,14 +170,29 @@ tool call:
 | async | SIGTERM | -15 | 0.10 s | No |
 | sync | SIGTERM | -15 | 0.11 s | No |
 
-**Root cause.** Either FastMCP or the MCP SDK installs a SIGINT handler
-intended for graceful cleanup; that cleanup awaits the in-flight tool,
-which never returns. SIGTERM is not caught — Python's default handler
-terminates the process immediately.
+**After `mcp_server/lifecycle.py`:**
 
-**Open.** No clean fix at the application layer. Operators should signal
-shutdown with SIGTERM, not SIGINT. Worth confirming what Claude Code
-sends to its MCP subprocesses.
+| Tool kind | Signal | Exit code | Time | Needed SIGKILL |
+|---|---|---|---|---|
+| async | SIGINT | **0** | 0.10 s | No |
+| async | SIGTERM | **0** | 0.10 s | No |
+| sync | * | -9 | 5.18 s | Yes (still wedged — `time.sleep` blocks the loop) |
+
+**Root cause.** Two distinct issues:
+
+1. The MCP SDK / FastMCP installs a SIGINT handler that awaits in-flight
+   tools, blocking shutdown forever. Resolved by installing our own
+   handler via `loop.add_signal_handler(SIGINT, ...)` *before* the
+   FastMCP server task starts; ours wins.
+2. asyncio cancellation cannot reach `stdio_server`'s blocking stdin
+   read, which runs on an anyio worker thread. Resolved by closing
+   `sys.stdin` in the signal handler — that triggers EOF, the reader
+   thread returns, the anyio task group exits, and the server stops
+   naturally. See `mcp_server/lifecycle.py:65–72`.
+
+**Open.** Sync tools still require SIGKILL on shutdown — same as A1/B2.
+`safe_tool` rejects sync tools at registration, so this only matters
+for tools registered via raw `@mcp.tool()`.
 
 ---
 
@@ -239,6 +255,43 @@ linearly past saturation — graceful queueing, no thrashing.
 This means the protocol layer + reliability guards hold under load on
 the happy path. All real findings come from the cancellation /
 lifecycle harness, where state spans more than one request.
+
+---
+
+## Restart contract
+
+`mcp_server/lifecycle.py` wraps `mcp.run_stdio_async` with a graceful
+shutdown handler. Both the production server and the stress server use
+it, so probes against `stress.server` validate the production behavior.
+
+**Contract** (verified by `stress.probe_restart`):
+
+* SIGTERM or SIGINT triggers shutdown.
+* Async in-flight tool tasks are cancelled (`CancelledError` propagates
+  through their `await` points; tools should use `try/finally` to
+  release resources).
+* Cleanup callbacks registered via `lifecycle.register_cleanup(fn)` run
+  in registration order, each capped at `MCP_CLEANUP_TIMEOUT_S` (default
+  2 s).
+* Total shutdown completes within `MCP_SHUTDOWN_GRACE_S` (default 5 s);
+  if a server task ignores cancellation past the grace, it is abandoned
+  and shutdown proceeds anyway.
+* Process exits with code 0 on clean shutdown.
+
+**Verified probe output:**
+
+```
+exit_code         0
+elapsed           0.11s  (grace=3.0s)
+graceful log      ✓
+server cancelled  ✓
+cleanup ran       ✓
+PASS
+```
+
+**Health/introspection.** The `health` tool (`mcp_server/tools/health.py`)
+reports `{status, ready, version, uptime_s, in_flight_tasks}` and flips
+`ready` to `false` once shutdown begins, useful for orchestrator probes.
 
 ---
 

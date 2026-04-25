@@ -70,6 +70,16 @@ Every tool registered via `safe_tool()` (in `mcp_server/app.py`) gets:
    concurrency, shutdown, and signal handling on the stdio transport
    (see [`STRESS_FINDINGS.md`](STRESS_FINDINGS.md) §A1, B2, D). Pass
    `allow_sync=True` for fast pure-CPU work.
+5. **Graceful restart** — `mcp_server/lifecycle.py` catches SIGTERM and
+   SIGINT, cancels in-flight tool tasks within
+   `MCP_SHUTDOWN_GRACE_S` (default 5 s), runs registered cleanup
+   callbacks, and exits cleanly. Tools can register cleanup hooks via
+   `lifecycle.register_cleanup(async_fn)` to release shared resources
+   (DB connections, cursors). Verified by
+   [`stress/probe_restart.py`](stress/probe_restart.py).
+6. **Health/introspection tool** — `health` reports `{status, ready,
+   version, uptime_s, in_flight_tasks}` and flips `ready` to false
+   during shutdown so supervisors / probes can detect drain state.
 
 ---
 

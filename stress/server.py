@@ -194,5 +194,14 @@ if __name__ == "__main__":
     # exactly what stdout_pollution_guarded is demonstrating.
     import logging
 
-    logging.basicConfig(stream=sys.stderr, level="WARNING")
-    mcp.run()
+    logging.basicConfig(stream=sys.stderr, level="INFO")
+    # Use the same lifecycle wrapper as production so probes against this
+    # server validate the production graceful-shutdown path.
+    from mcp_server.lifecycle import run_with_lifecycle, register_cleanup
+
+    async def _stress_cleanup() -> None:
+        # Marker line for probe_restart to grep.
+        print("STRESS_CLEANUP_RAN", file=sys.stderr, flush=True)
+
+    register_cleanup(_stress_cleanup)
+    asyncio.run(run_with_lifecycle(mcp))
