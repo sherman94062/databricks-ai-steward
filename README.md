@@ -18,12 +18,14 @@ the stdio session.
 
 ```bash
 source .venv/bin/activate
-pip install -e '.[dev]'
+pip install -e '.[dev]'             # add ',http' for HTTP transports
 
-# Run the server (stdio — blocks waiting for an MCP client)
-python -m mcp_server.server
+# Run the server — choose a transport
+python -m mcp_server.server                              # stdio (default)
+python -m mcp_server.server --transport streamable-http  # http://127.0.0.1:8765/mcp
+python -m mcp_server.server --transport sse              # http://127.0.0.1:8765/sse
 
-# Or register with Claude Code
+# Register with Claude Code (stdio)
 claude mcp add databricks-steward -- python -m mcp_server.server
 
 # Tests
@@ -32,6 +34,20 @@ pytest tests/
 
 See [`WALKTHROUGH.md`](WALKTHROUGH.md) for the full setup and
 tool-authoring guide.
+
+### Transports
+
+| Transport | Path | Used by |
+|---|---|---|
+| `stdio` (default) | n/a | Claude Code, Claude Desktop, Cursor (local), most IDE plugins |
+| `streamable-http` | `/mcp` on `MCP_HOST:MCP_PORT` | Newer hosted agent harnesses; preferred for HTTP |
+| `sse` | `/sse` + `/messages/` on `MCP_HOST:MCP_PORT` | Older HTTP-based clients still using SSE |
+
+All three use the same tool surface, the same reliability guards, and
+the same per-call timeout. Stdio uses
+[`mcp_server/lifecycle.py`](mcp_server/lifecycle.py) for graceful
+shutdown; HTTP transports rely on uvicorn's built-in graceful drain on
+SIGTERM/SIGINT.
 
 ---
 

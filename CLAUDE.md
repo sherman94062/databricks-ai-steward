@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A Databricks AI Steward: an MCP server exposing a governed set of tools that let AI agents interact with Databricks safely. Planned tool surface: `list_catalogs`, `list_tables`, `describe_table`, `sample_table`, `execute_sql_safe`. Cross-cutting concerns: SQL safety, schema discovery, query governance, audit logging.
 
-Current state is scaffolding only — `list_catalogs` is a hardcoded stub, and the `databricks/`, `governance/`, `agents/`, `examples/`, and `tests/` directories are empty placeholders. `README.md` and `PROJECT_SPEC.md` are empty. `AGENTS.md` (from the project's initial Codex bootstrap) restates the goal; prefer this file going forward.
+Current state is scaffolding plus a substantial reliability/transport layer. `list_catalogs` is a hardcoded stub; the `databricks/`, `governance/`, `agents/`, and `examples/` directories are empty placeholders. `PROJECT_SPEC.md` is empty. `README.md`, `WALKTHROUGH.md`, `FLOW.md`, `STRESS_FINDINGS.md`, and `FAILURE_MODES.md` are populated. `AGENTS.md` (from the project's initial Codex bootstrap) restates the goal; prefer this file going forward.
 
 ## Commands
 
@@ -18,8 +18,9 @@ source .venv/bin/activate
 # Sync deps after pulling or editing pyproject.toml
 pip install -e '.[dev]'   # omit [dev] for runtime-only
 
-# Run the MCP server (stdio transport — blocks waiting for a client)
+# Run the MCP server (defaults to stdio; --transport streamable-http or sse for HTTP)
 python -m mcp_server.server
+python -m mcp_server.server --transport streamable-http --port 8765
 
 # Register with Claude Code
 claude mcp add databricks-steward -- python -m mcp_server.server
@@ -30,9 +31,11 @@ pytest tests/
 
 ## Architecture
 
-### MCP via FastMCP (stdio)
+### MCP via FastMCP
 
-`mcp_server/server.py` runs a `FastMCP` server that speaks the Model Context Protocol over stdio — the transport Claude Code expects. The `FastMCP` instance lives in `mcp_server/app.py` so tool modules can import it without a circular dependency on `server.py`.
+`mcp_server/server.py` is the entry point. It selects a transport (`stdio` by default; `streamable-http` and `sse` available via `--transport` or `MCP_TRANSPORT`) and delegates to FastMCP. The `FastMCP` instance lives in `mcp_server/app.py` so tool modules can import it without a circular dependency.
+
+For stdio, `mcp_server/lifecycle.py` wraps the run with custom signal handling: SIGTERM/SIGINT close stdin (forcing the anyio reader thread to release — asyncio cancellation alone cannot interrupt it), the server task exits, registered cleanup callbacks run, and the process exits with code 0. For HTTP transports, uvicorn handles graceful shutdown natively.
 
 ### Adding a tool
 
