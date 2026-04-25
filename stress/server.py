@@ -10,6 +10,7 @@ by the production server.
 
 from __future__ import annotations
 
+import asyncio
 import sys
 import time
 from typing import Any
@@ -74,9 +75,32 @@ def stdout_pollution_guarded() -> dict:
 @mcp.tool()
 @_guard
 def hangs_forever_guarded() -> dict:
-    """Sleeps far longer than any client should wait. No timeout guard exists."""
+    """Sleeps far longer than any client should wait, using a *blocking* sleep.
+    This blocks the entire event loop — no other requests can be served."""
     time.sleep(300)
     return {"ok": True}
+
+
+@mcp.tool()
+@_guard
+async def hangs_forever_async_guarded() -> dict:
+    """Same hang, but cooperatively yields. The event loop stays free to
+    service other requests; the question is whether client-side cancellation
+    propagates to cancel this coroutine on the server."""
+    await asyncio.sleep(300)
+    return {"ok": True}
+
+
+# ---- introspection -----------------------------------------------------
+@mcp.tool()
+@_guard
+async def task_count() -> dict:
+    """Report the number of asyncio tasks currently alive on the server,
+    excluding this call's own task. Used to detect leaked coroutines from
+    cancelled prior requests."""
+    me = asyncio.current_task()
+    alive = [t for t in asyncio.all_tasks() if t is not me and not t.done()]
+    return {"count": len(alive)}
 
 
 # ---- unserializable return ---------------------------------------------
