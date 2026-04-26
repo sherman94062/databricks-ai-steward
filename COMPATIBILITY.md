@@ -16,6 +16,8 @@ server, on which transport, and what worked. Keep this honest:
 | MCP Python SDK ClientSession | streamable-http | 2026-04-25 | ✓ | ✓ | `stress/probe_http_transport.py` |
 | MCP TypeScript SDK Client | stdio | 2026-04-26 | ✓ | ✓ | `stress/probe_typescript_compat.py`; cross-language signal |
 | MCP TypeScript SDK Client | streamable-http | 2026-04-26 | ✓ | ✓ | Same probe |
+| langchain-mcp-adapters | stdio | 2026-04-26 | ✓ | ✓ | `stress/probe_langchain_compat.py` — covers most LangChain / LangGraph agent stacks that wrap MCP |
+| langchain-mcp-adapters | streamable-http | 2026-04-26 | ✓ | ✓ | Same probe |
 | Goose (Block) CLI 1.32.0 | stdio | 2026-04-26 | ✓ | partial | Extension loaded cleanly, session ran with our server registered. Tool invocation via LLM not run end-to-end (would require fresh keychain auth grant + Anthropic credits). See "Goose recipe" below. |
 | Claude Desktop (macOS) | stdio | 2026-04-26 | ✓ | ✓ | Verified end-to-end after relaunch. Config in `~/Library/Application Support/Claude/claude_desktop_config.json`. |
 | Cursor (macOS) | stdio | 2026-04-26 | ✓ | ✓ | Verified end-to-end: Composer agent called `list_catalogs` via MCP and returned the expected stub. Config in this repo's `.cursor/mcp.json` (gitignored). |
@@ -39,7 +41,6 @@ evidence those clients should also work.
 | Client | Transport | Priority |
 |---|---|---|
 | Cline (VS Code) | stdio | High — popular dev workflow |
-| LangChain MCP adapters | stdio | Medium — agent framework wrapper |
 | LangGraph | via LangChain | Low — same SDK underneath |
 | OpenAI Agents SDK | stdio + http | Low — newer; often paywalled |
 
@@ -60,6 +61,10 @@ python -m stress.probe_typescript_compat
 
 # Python SDK over HTTP
 python -m stress.probe_http_transport
+
+# langchain-mcp-adapters (stdio + streamable-http)
+python -m stress.probe_langchain_compat
+# requires `pip install -e '.[dev]'` (the adapter is a dev dep)
 ```
 
 Both probes are runnable in CI once Node is available on the runner.

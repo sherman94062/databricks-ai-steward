@@ -12,6 +12,9 @@ dependencies = [
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
+    # Required by stress/probe_langchain_compat.py — verifies the
+    # langchain-ai/langchain-mcp-adapters wrapper can load our tools.
+    "langchain-mcp-adapters>=0.1",
 ]
 http = [
     # Required for --transport sse and --transport streamable-http.
