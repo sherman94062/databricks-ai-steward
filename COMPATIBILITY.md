@@ -14,11 +14,20 @@ server, on which transport, and what worked. Keep this honest:
 | MCP Inspector (CLI mode) | streamable-http | 2026-04-25 | ✓ | ✓ | Same probe |
 | MCP Python SDK ClientSession | stdio | 2026-04-25 | ✓ | ✓ | Used by every probe under `stress/` |
 | MCP Python SDK ClientSession | streamable-http | 2026-04-25 | ✓ | ✓ | `stress/probe_http_transport.py` |
+| MCP TypeScript SDK Client | stdio | 2026-04-26 | ✓ | ✓ | `stress/probe_typescript_compat.py`; cross-language signal |
+| MCP TypeScript SDK Client | streamable-http | 2026-04-26 | ✓ | ✓ | Same probe |
 
 The MCP Inspector pass is the strongest single signal — it is the
 reference debugging tool from the MCP team and exercises the spec
 end-to-end. If a new client breaks but Inspector still works, the
 problem is most likely client-side, not server-side.
+
+The MCP TypeScript SDK pass is the second strongest: it validates that
+the spec implementation is correct *across languages*, not just within
+the Python SDK ecosystem that drives most other probes. Most
+non-Python clients (Claude Desktop, Cursor, Cline, Goose, Continue.dev)
+sit on top of `@modelcontextprotocol/sdk` for Node, so this is direct
+evidence those clients should also work.
 
 ---
 
@@ -30,7 +39,6 @@ problem is most likely client-side, not server-side.
 | Cursor | stdio | High — IDE adoption is broad |
 | Cline (VS Code) | stdio | High — popular dev workflow |
 | Goose (Block) | stdio + http | Medium — both transports in one tool |
-| MCP TypeScript SDK | stdio + http | Medium — cross-language compliance signal |
 | LangChain MCP adapters | stdio | Medium — agent framework wrapper |
 | LangGraph | via LangChain | Low — same SDK underneath |
 | OpenAI Agents SDK | stdio + http | Low — newer; often paywalled |
@@ -45,6 +53,10 @@ source .venv/bin/activate
 # Inspector (stdio + streamable-http)
 python -m stress.probe_inspector_compat
 # requires Node + npx; Inspector is fetched via npx on first run
+
+# TypeScript SDK (stdio + streamable-http)
+python -m stress.probe_typescript_compat
+# requires Node + npx; runs `npm install` in stress/ts/ on first run
 
 # Python SDK over HTTP
 python -m stress.probe_http_transport
