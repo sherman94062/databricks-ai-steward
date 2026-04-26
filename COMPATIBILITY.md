@@ -16,6 +16,7 @@ server, on which transport, and what worked. Keep this honest:
 | MCP Python SDK ClientSession | streamable-http | 2026-04-25 | ✓ | ✓ | `stress/probe_http_transport.py` |
 | MCP TypeScript SDK Client | stdio | 2026-04-26 | ✓ | ✓ | `stress/probe_typescript_compat.py`; cross-language signal |
 | MCP TypeScript SDK Client | streamable-http | 2026-04-26 | ✓ | ✓ | Same probe |
+| Goose (Block) CLI 1.32.0 | stdio | 2026-04-26 | ✓ | partial | Extension loaded cleanly, session ran with our server registered. Tool invocation via LLM not run end-to-end (would require fresh keychain auth grant + Anthropic credits). See "Goose recipe" below. |
 
 The MCP Inspector pass is the strongest single signal — it is the
 reference debugging tool from the MCP team and exercises the spec
@@ -38,7 +39,6 @@ evidence those clients should also work.
 | Claude Desktop | stdio | High — most common consumer-facing client |
 | Cursor | stdio | High — IDE adoption is broad |
 | Cline (VS Code) | stdio | High — popular dev workflow |
-| Goose (Block) | stdio + http | Medium — both transports in one tool |
 | LangChain MCP adapters | stdio | Medium — agent framework wrapper |
 | LangGraph | via LangChain | Low — same SDK underneath |
 | OpenAI Agents SDK | stdio + http | Low — newer; often paywalled |
@@ -63,6 +63,46 @@ python -m stress.probe_http_transport
 ```
 
 Both probes are runnable in CI once Node is available on the runner.
+
+---
+
+## Goose recipe
+
+Block's [Goose](https://block.github.io/goose/) (`brew install
+block-goose-cli`) loads MCP servers as "extensions" configured in
+`~/.config/goose/config.yaml`. To register this server for stdio:
+
+```yaml
+extensions:
+  databricks-steward-stdio:
+    enabled: true
+    type: stdio
+    name: databricks-steward (stdio)
+    cmd: /absolute/path/to/.venv/bin/python
+    args: [-m, mcp_server.server]
+    envs: {}
+    env_keys: []
+    timeout: 60
+    bundled: null
+    available_tools: []
+```
+
+For HTTP, use the same shape with `type: streamable_http` and a `uri:`
+field pointing at `http://127.0.0.1:8765/mcp` (after starting the
+server with `--transport streamable-http`). Add `headers:` with
+`Authorization: Bearer ...` if `MCP_BEARER_TOKEN` is set.
+
+**Verification recipe.** A simple session that exercises the tool:
+
+```bash
+goose run -t "Use the databricks-steward extension's list_catalogs tool. \
+Return only the JSON output."
+```
+
+A successful run prints something containing
+`{"catalogs": ["main", "analytics", "system"]}`. This requires Goose's
+configured LLM provider to be reachable (Anthropic / OpenAI key in
+keychain or env).
 
 ---
 
