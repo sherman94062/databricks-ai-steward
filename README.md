@@ -6,11 +6,14 @@ registered with a thin reliability layer (size cap, exception capture,
 per-tool timeout, sync-tool rejection) so a misbehaving tool can't take down
 the stdio session.
 
-> **Status — scaffolding.** The MCP server runs and exposes one stub tool
-> (`list_catalogs`). The Databricks client, SQL safety layer, and audit
-> logging are designed but not yet implemented. The reliability layer and
-> the stress-testing harness *are* built and exercised — see
-> [`STRESS_FINDINGS.md`](STRESS_FINDINGS.md).
+> **Status — early integration.** The MCP server is wired to a live
+> Databricks workspace: `list_catalogs` calls the Unity Catalog API
+> (`databricks-sdk`) and returns real catalog metadata. The remaining
+> planned tools (`list_tables`, `describe_table`, `sample_table`,
+> `execute_sql_safe`) are still designed-but-not-implemented. The
+> reliability layer and the stress / compatibility harness are built and
+> exercised — see [`STRESS_FINDINGS.md`](STRESS_FINDINGS.md) and
+> [`COMPATIBILITY.md`](COMPATIBILITY.md).
 
 ---
 
@@ -19,6 +22,10 @@ the stdio session.
 ```bash
 source .venv/bin/activate
 pip install -e '.[dev]'             # add ',http' for HTTP transports
+
+# Auth — minimum required to call list_catalogs against a workspace
+echo "DATABRICKS_HOST=https://<your-workspace>.cloud.databricks.com" >> .env
+echo "DATABRICKS_TOKEN=dapi..." >> .env
 
 # Run the server — choose a transport
 python -m mcp_server.server                              # stdio (default)
@@ -68,7 +75,8 @@ or sidecar). Verified by [`stress/probe_http_auth.py`](stress/probe_http_auth.py
 
 | Tool | Status | Purpose |
 |---|---|---|
-| `list_catalogs` | stub | Enumerate Unity Catalog catalogs |
+| `list_catalogs` | live | Enumerate Unity Catalog catalogs (real `databricks-sdk` call) |
+| `health` | live | Server liveness + drain-state introspection |
 | `list_tables` | planned | Enumerate tables in a catalog / schema |
 | `describe_table` | planned | Return column definitions and metadata |
 | `sample_table` | planned | Return a bounded row sample |

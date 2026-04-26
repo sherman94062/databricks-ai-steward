@@ -68,10 +68,24 @@ async def _exercise() -> int:
                 return 1
 
             r = await session.call_tool("list_catalogs", {})
-            summary = _summarize(r)
-            print(f"[list_catalogs] {summary}")
-            if "main" not in summary or "analytics" not in summary:
-                print("FAIL: list_catalogs response missing expected catalogs")
+            # Parse the raw text content (not the truncated _summarize output).
+            raw_text = next(
+                (item.text for item in getattr(r, "content", []) or [] if getattr(item, "text", None)),
+                "",
+            )
+            try:
+                payload = json.loads(raw_text)
+                catalogs = payload.get("catalogs", [])
+                ok = (
+                    isinstance(catalogs, list)
+                    and len(catalogs) > 0
+                    and all(isinstance(c, dict) and "name" in c for c in catalogs)
+                )
+            except (json.JSONDecodeError, AttributeError):
+                ok = False
+            print(f"[list_catalogs] {len(catalogs) if ok else 0} catalog(s)")
+            if not ok:
+                print("FAIL: list_catalogs did not return the expected [{name,...}] shape")
                 return 1
 
             r = await session.call_tool("health", {})

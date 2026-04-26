@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A Databricks AI Steward: an MCP server exposing a governed set of tools that let AI agents interact with Databricks safely. Planned tool surface: `list_catalogs`, `list_tables`, `describe_table`, `sample_table`, `execute_sql_safe`. Cross-cutting concerns: SQL safety, schema discovery, query governance, audit logging.
 
-Current state is scaffolding plus a substantial reliability/transport layer. `list_catalogs` is a hardcoded stub; the `databricks/`, `governance/`, `agents/`, and `examples/` directories are empty placeholders. `PROJECT_SPEC.md` is empty. `README.md`, `WALKTHROUGH.md`, `FLOW.md`, `STRESS_FINDINGS.md`, and `FAILURE_MODES.md` are populated. `AGENTS.md` (from the project's initial Codex bootstrap) restates the goal; prefer this file going forward.
+Current state: `list_catalogs` is now a live Unity Catalog call (via `databricks-sdk`); the rest of the planned tool surface (`list_tables`, `describe_table`, `sample_table`, `execute_sql_safe`) is not yet implemented. The `governance/`, `agents/`, and `examples/` directories are empty placeholders. The Databricks integration lives at `mcp_server/databricks/` (not the top-level `databricks/`, which would namespace-collide with `databricks-sdk`'s pkgutil-style package). `PROJECT_SPEC.md` is empty. `README.md`, `WALKTHROUGH.md`, `FLOW.md`, `STRESS_FINDINGS.md`, `COMPATIBILITY.md`, and `FAILURE_MODES.md` are populated. `AGENTS.md` (from the project's initial Codex bootstrap) restates the goal; prefer this file going forward.
 
 ## Commands
 
@@ -36,6 +36,12 @@ pytest tests/
 `mcp_server/server.py` is the entry point. It selects a transport (`stdio` by default; `streamable-http` and `sse` available via `--transport` or `MCP_TRANSPORT`) and delegates to FastMCP. The `FastMCP` instance lives in `mcp_server/app.py` so tool modules can import it without a circular dependency.
 
 For stdio, `mcp_server/lifecycle.py` wraps the run with custom signal handling: SIGTERM/SIGINT close stdin (forcing the anyio reader thread to release — asyncio cancellation alone cannot interrupt it), the server task exits, registered cleanup callbacks run, and the process exits with code 0. For HTTP transports, uvicorn handles graceful shutdown natively.
+
+### Databricks integration
+
+Live Unity Catalog access goes through `mcp_server/databricks/client.py`, which owns a singleton `WorkspaceClient` (lazy init) and a `run_in_thread` helper that dispatches synchronous SDK calls to a worker thread via `asyncio.to_thread`. Tools must use this helper — calling `databricks-sdk` synchronously from an async tool would block the event loop (per `STRESS_FINDINGS` finding A1).
+
+Auth comes from `DATABRICKS_HOST` and `DATABRICKS_TOKEN` in `.env` (loaded by `mcp_server.server` at startup). The SDK also honors `~/.databrickscfg` profiles as a fallback. Tests inject a mock client via `set_workspace_for_tests(mock)` so they never touch the real workspace.
 
 ### Adding a tool
 

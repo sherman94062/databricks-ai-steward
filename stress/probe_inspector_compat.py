@@ -65,12 +65,21 @@ def _verify_tools_list(stdout: str) -> bool:
 
 
 def _verify_list_catalogs(stdout: str) -> bool:
+    """Verify the response shape, not specific catalog names — those are
+    workspace-dependent."""
     try:
         data = json.loads(stdout)
         text = data["content"][0]["text"]
         payload = json.loads(text)
-        ok = "main" in payload.get("catalogs", []) and not data.get("isError")
-        return _check("tools/call list_catalogs", ok, f"catalogs={payload.get('catalogs')}")
+        catalogs = payload.get("catalogs")
+        ok = (
+            isinstance(catalogs, list)
+            and len(catalogs) > 0
+            and all(isinstance(c, dict) and "name" in c for c in catalogs)
+            and not data.get("isError")
+        )
+        names = [c.get("name") for c in catalogs] if isinstance(catalogs, list) else None
+        return _check("tools/call list_catalogs", ok, f"got {len(catalogs or [])} catalog(s): {names}")
     except Exception as e:
         return _check("tools/call list_catalogs", False, f"parse error: {e}")
 

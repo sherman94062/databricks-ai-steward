@@ -83,11 +83,13 @@ async def _exercise(client: MultiServerMCPClient, transport_label: str) -> bool:
 
     out = await by_name["list_catalogs"].ainvoke({})
     parsed = _parse_tool_output(out)
+    catalogs = parsed.get("catalogs") if parsed else None
     b = _check(
         "list_catalogs.ainvoke()",
-        parsed is not None
-        and parsed.get("catalogs") == ["main", "analytics", "system"],
-        f"got {parsed}",
+        isinstance(catalogs, list)
+        and len(catalogs) > 0
+        and all(isinstance(c, dict) and "name" in c for c in catalogs),
+        f"got {len(catalogs) if isinstance(catalogs, list) else 'n/a'} catalog(s)",
     )
 
     out = await by_name["health"].ainvoke({})

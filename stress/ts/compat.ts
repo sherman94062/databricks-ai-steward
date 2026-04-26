@@ -62,15 +62,20 @@ async function runChecks(client: Client, transport: string): Promise<Verdict> {
     verdict.ok = false;
   }
 
-  // 2. tools/call list_catalogs
+  // 2. tools/call list_catalogs (live workspace; verify shape, not names)
   try {
     const r = await client.callTool({ name: "list_catalogs", arguments: {} });
     const payload = parseToolText(r.content);
+    const catalogs = (payload as any)?.catalogs;
     const ok =
-      typeof payload === "object" &&
-      Array.isArray((payload as any).catalogs) &&
-      (payload as any).catalogs.includes("main");
-    verdict.steps.push({ name: "tools/call list_catalogs", ok });
+      Array.isArray(catalogs) &&
+      catalogs.length > 0 &&
+      catalogs.every((c: any) => c && typeof c === "object" && typeof c.name === "string");
+    verdict.steps.push({
+      name: "tools/call list_catalogs",
+      ok,
+      detail: ok ? `${catalogs.length} catalog(s)` : `bad shape: ${JSON.stringify(payload).slice(0, 100)}`,
+    });
     if (!ok) verdict.ok = false;
   } catch (e: any) {
     verdict.steps.push({
