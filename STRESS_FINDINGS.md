@@ -11,7 +11,7 @@ that have landed are noted; the rest are open.
 | ID | Finding | Severity | Status |
 |---|---|---|---|
 | A1 | Sync tool blocks the event loop, wedging the entire session | High | **Fixed** — `safe_tool` now refuses sync tools |
-| A.1 | Client cancellation does not propagate; cancelled async calls leak server-side coroutines | High | **Mitigated** — per-tool server-side timeout; upstream bug remains |
+| A.1 | Client cancellation does not propagate; cancelled async calls leak server-side coroutines | High | **Mitigated locally** + **filed upstream as [python-sdk#2507](https://github.com/modelcontextprotocol/python-sdk/issues/2507)** |
 | B2 | Sync hang prevents clean shutdown on stdin EOF (requires SIGKILL) | Medium | Inherits A1 fix |
 | C1 | SIGINT is swallowed during in-flight calls (SIGTERM works) | Medium | **Mitigated** — lifecycle handler catches both signals |
 | D | A single sync slow call kills 100% of concurrent fast calls; async slow adds ~3 ms | High | Inherits A1 fix |
@@ -136,9 +136,14 @@ the client never sends a cancellation notification.
 baseline within 1s after 50 client-cancelled calls when the underlying
 tool has `timeout_s=0.5`.
 
-**Still open.** The upstream SDK bug is unfixed. A patch on the client
-SDK would let cancellations propagate immediately, sub-second, without
-needing a server-side timeout. Worth filing.
+**Filed upstream**:
+[modelcontextprotocol/python-sdk#2507](https://github.com/modelcontextprotocol/python-sdk/issues/2507)
+covers both the SDK-internal `TimeoutError` path (already documented
+in the closed-as-duplicate #1458) and the previously-uncovered
+external `CancelledError` path that this server's
+`stress.probe_a1_leak` exercises. Includes a proposed fix using
+`anyio.get_cancelled_exc_class()` so it works under both asyncio and
+trio backends.
 
 ---
 
