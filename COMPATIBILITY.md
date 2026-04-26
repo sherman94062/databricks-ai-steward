@@ -17,6 +17,7 @@ server, on which transport, and what worked. Keep this honest:
 | MCP TypeScript SDK Client | stdio | 2026-04-26 | ✓ | ✓ | `stress/probe_typescript_compat.py`; cross-language signal |
 | MCP TypeScript SDK Client | streamable-http | 2026-04-26 | ✓ | ✓ | Same probe |
 | Goose (Block) CLI 1.32.0 | stdio | 2026-04-26 | ✓ | partial | Extension loaded cleanly, session ran with our server registered. Tool invocation via LLM not run end-to-end (would require fresh keychain auth grant + Anthropic credits). See "Goose recipe" below. |
+| Claude Desktop (macOS) | stdio | 2026-04-26 | recipe | recipe | Config registered in `~/Library/Application Support/Claude/claude_desktop_config.json`. JSON validated. Live UI verification requires Claude Desktop quit-and-relaunch — see "Claude Desktop recipe" below. |
 
 The MCP Inspector pass is the strongest single signal — it is the
 reference debugging tool from the MCP team and exercises the spec
@@ -36,7 +37,6 @@ evidence those clients should also work.
 
 | Client | Transport | Priority |
 |---|---|---|
-| Claude Desktop | stdio | High — most common consumer-facing client |
 | Cursor | stdio | High — IDE adoption is broad |
 | Cline (VS Code) | stdio | High — popular dev workflow |
 | LangChain MCP adapters | stdio | Medium — agent framework wrapper |
@@ -63,6 +63,48 @@ python -m stress.probe_http_transport
 ```
 
 Both probes are runnable in CI once Node is available on the runner.
+
+---
+
+## Claude Desktop recipe
+
+Claude Desktop on macOS reads MCP server registrations from
+`~/Library/Application Support/Claude/claude_desktop_config.json`.
+Add a stdio entry under `mcpServers`:
+
+```json
+{
+  "mcpServers": {
+    "databricks-steward": {
+      "command": "/absolute/path/to/.venv/bin/python",
+      "args": ["-m", "mcp_server.server"]
+    }
+  }
+}
+```
+
+After editing the config, **fully quit Claude Desktop (Cmd+Q — closing
+the window is not enough)** and relaunch. Claude Desktop only spawns
+MCP server subprocesses at startup.
+
+**To verify in the UI:**
+1. In a new chat, click the tools / sliders icon in the message
+   composer.
+2. `databricks-steward` should appear in the list of connected
+   servers, showing `list_catalogs` and `health` as available tools.
+3. Ask Claude something like "use list_catalogs from
+   databricks-steward". It should call the tool and return
+   `{"catalogs": ["main", "analytics", "system"]}`.
+
+**To remove**: edit the config, drop the `databricks-steward` entry,
+quit + relaunch.
+
+**Troubleshooting**: if the server doesn't appear, check Claude
+Desktop's developer log at
+`~/Library/Logs/Claude/mcp-server-databricks-steward.log` for the
+spawned subprocess's stderr. Common causes: wrong `command` path
+(must be the absolute path to your venv's python), or a typo in the
+JSON (Claude Desktop silently skips invalid entries).
 
 ---
 
