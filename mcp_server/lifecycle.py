@@ -1,39 +1,41 @@
-"""Graceful shutdown and process lifecycle for the MCP stdio server.
+"""Graceful shutdown and process lifecycle for the MCP server.
 
-FastMCP's default `run()` does not handle SIGTERM/SIGINT cooperatively
-with in-flight tools — the process exits abruptly and tools that hold
-external resources (DB connections, cursors, locks) cannot release them.
+Two layers:
 
-`run_with_lifecycle(mcp)` replaces `mcp.run()` and adds:
-  * SIGTERM and SIGINT handlers that trigger a bounded graceful shutdown
-  * a registry of async cleanup callbacks that run before the process exits
-  * a `is_shutting_down()` flag for the health tool
+  * `lifespan(server)` — a FastMCP lifespan context manager. Both
+    transports invoke it: stdio enters it inside `run_stdio_async`,
+    HTTP transports invoke it via uvicorn's lifespan event. Cleanup
+    callbacks registered via `register_cleanup` run on `__aexit__`,
+    each capped at `MCP_CLEANUP_TIMEOUT_S` (default 2s).
 
-Shutdown sequence on signal:
-  1. handler sets the shutdown event
-  2. server task is cancelled (which cascades to in-flight tool tasks)
-  3. wait for server to exit, up to MCP_SHUTDOWN_GRACE_S seconds
-  4. run each cleanup callback, each capped at 2s
-  5. return — the asyncio.run wrapper returns to caller
+  * `run_with_lifecycle(mcp)` — stdio-only signal handler. Catches
+    SIGTERM/SIGINT and closes stdin to force the anyio reader thread
+    to release (asyncio cancellation can't reach blocked threads).
+    The lifespan __aexit__ then handles cleanup naturally.
 
-If the grace deadline expires, the partially-cancelled server is
-abandoned and shutdown proceeds anyway. The caller should rely on
-process exit (return from main) rather than calling sys.exit, so cleanup
-callbacks are reached even on grace overrun.
+For HTTP, uvicorn already does graceful drain on SIGTERM and invokes
+the lifespan shutdown after; we don't install our own signal handlers
+on that path to avoid double-shutdown.
 """
 
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import signal
 import sys
 import time
-from typing import Awaitable, Callable
+from contextlib import asynccontextmanager
+from typing import AsyncIterator, Awaitable, Callable
 
 from mcp.server.fastmcp import FastMCP
 
-from mcp_server.app import log
+# Use our own logger rather than importing from mcp_server.app — app.py
+# imports lifespan from this module, which would create a circular
+# import. mcp_server.app's basicConfig has already configured the root
+# logger (it's imported before this module by both server.py and stress).
+log = logging.getLogger("mcp_server.lifecycle")
 
 
 SHUTDOWN_GRACE_S = float(os.environ.get("MCP_SHUTDOWN_GRACE_S", "5"))
@@ -42,49 +44,94 @@ CLEANUP_TIMEOUT_S = float(os.environ.get("MCP_CLEANUP_TIMEOUT_S", "2"))
 _shutdown_event: asyncio.Event | None = None
 _cleanup_callbacks: list[Callable[[], Awaitable[None]]] = []
 _started_at: float = time.monotonic()
+_shutting_down: bool = False
 
 
 def register_cleanup(fn: Callable[[], Awaitable[None]]) -> None:
-    """Register an async cleanup callback to run before exit on graceful shutdown.
+    """Register an async cleanup callback to run on graceful shutdown.
 
     Each callback is awaited with a per-callback timeout (CLEANUP_TIMEOUT_S).
     Exceptions are logged and swallowed — one bad callback should not block
     others from running.
+
+    Callbacks fire on both stdio and HTTP shutdown paths because they
+    are invoked from the FastMCP lifespan __aexit__, which both
+    transports run.
     """
     _cleanup_callbacks.append(fn)
 
 
 def is_shutting_down() -> bool:
-    """True once a shutdown signal has been received."""
-    return _shutdown_event is not None and _shutdown_event.is_set()
+    """True once shutdown has begun.
+
+    On stdio: flips when SIGTERM/SIGINT is received (before drain).
+    On HTTP: flips at the start of the lifespan shutdown phase (after
+    uvicorn drains in-flight requests). The HTTP latency is intrinsic
+    to uvicorn — we'd need to install a signal handler that races
+    uvicorn's to flip earlier, which is brittle.
+    """
+    return _shutting_down
 
 
 def uptime_s() -> float:
     return time.monotonic() - _started_at
 
 
-async def run_with_lifecycle(mcp: FastMCP) -> None:
-    """Run mcp.run_stdio_async with cooperative SIGTERM/SIGINT handling."""
-    global _shutdown_event, _started_at
-    _shutdown_event = asyncio.Event()
+@asynccontextmanager
+async def lifespan(server: FastMCP) -> AsyncIterator[None]:
+    """FastMCP lifespan: runs cleanup callbacks on shutdown for both
+    stdio and HTTP transports.
+
+    Pass this as `lifespan=lifespan` when constructing FastMCP.
+    """
+    global _started_at, _shutting_down
     _started_at = time.monotonic()
+    _shutting_down = False
+    try:
+        yield None
+    finally:
+        _shutting_down = True
+        if _cleanup_callbacks:
+            log.warning("running %d cleanup callback(s)", len(_cleanup_callbacks))
+            for cb in _cleanup_callbacks:
+                try:
+                    await asyncio.wait_for(cb(), timeout=CLEANUP_TIMEOUT_S)
+                except asyncio.TimeoutError:
+                    log.warning("cleanup callback %s exceeded %.1fs",
+                                getattr(cb, "__name__", repr(cb)), CLEANUP_TIMEOUT_S)
+                except Exception:
+                    log.exception("cleanup callback %s raised",
+                                  getattr(cb, "__name__", repr(cb)))
+
+
+async def run_with_lifecycle(mcp: FastMCP) -> None:
+    """Run mcp.run_stdio_async with cooperative SIGTERM/SIGINT handling.
+
+    HTTP transports do not use this — they go directly through
+    `mcp.run_streamable_http_async()` / `run_sse_async()` and rely on
+    uvicorn's built-in graceful drain.
+    """
+    global _shutdown_event
+    _shutdown_event = asyncio.Event()
 
     loop = asyncio.get_running_loop()
 
     def _on_signal(signame: str) -> None:
+        global _shutting_down
         if _shutdown_event.is_set():
             log.warning("received %s during shutdown; ignoring", signame)
             return
-        # WARNING level so shutdown events show up under default MCP_LOG_LEVEL.
         log.warning("received %s; beginning graceful shutdown (grace=%.1fs)",
                     signame, SHUTDOWN_GRACE_S)
         _shutdown_event.set()
+        # Flip is_shutting_down() *before* drain so the health tool can
+        # advertise drain mode immediately.
+        _shutting_down = True
         # FastMCP's stdio_server runs stdin_reader on anyio, which under
-        # asyncio dispatches the blocking read to a worker thread. asyncio
-        # cancellation cannot reach a blocked thread; closing stdin forces
-        # EOF, the reader thread returns, the anyio task group completes,
-        # and run_stdio_async exits naturally. Without this the server
-        # never observes our cancellation and shutdown hangs.
+        # asyncio dispatches the blocking read to a worker thread.
+        # asyncio cancellation cannot reach a blocked thread; closing
+        # stdin forces EOF, the reader thread returns, the anyio task
+        # group completes, and run_stdio_async exits naturally.
         try:
             os.close(sys.stdin.fileno())
         except OSError:
@@ -94,9 +141,7 @@ async def run_with_lifecycle(mcp: FastMCP) -> None:
         try:
             loop.add_signal_handler(sig, _on_signal, name)
         except NotImplementedError:
-            # Windows: add_signal_handler isn't supported. Fall back to
-            # signal.signal which fires on the main thread; we use
-            # call_soon_threadsafe to bridge into the loop.
+            # Windows: add_signal_handler isn't supported. Fall back.
             log.warning("loop.add_signal_handler unavailable for %s; "
                         "using signal.signal fallback", name)
             signal.signal(sig, lambda *_: loop.call_soon_threadsafe(_on_signal, name))
@@ -110,19 +155,17 @@ async def run_with_lifecycle(mcp: FastMCP) -> None:
     )
 
     if shutdown_watch in done:
-        # Signal-driven shutdown
         log.warning("cancelling server task")
         server_task.cancel()
         try:
             await asyncio.wait_for(server_task, timeout=SHUTDOWN_GRACE_S)
-            log.warning("server stopped cleanly within grace")
+            log.warning("server cancelled cleanly")
         except asyncio.CancelledError:
             log.warning("server cancelled cleanly")
         except asyncio.TimeoutError:
             log.warning("server did not stop within %.1fs grace; abandoning",
                         SHUTDOWN_GRACE_S)
     else:
-        # Server exited on its own (typically stdin EOF from client disconnect)
         log.info("server exited; client likely disconnected")
         shutdown_watch.cancel()
         try:
@@ -130,14 +173,5 @@ async def run_with_lifecycle(mcp: FastMCP) -> None:
         except asyncio.CancelledError:
             pass
 
-    if _cleanup_callbacks:
-        log.info("running %d cleanup callback(s)", len(_cleanup_callbacks))
-        for cb in _cleanup_callbacks:
-            try:
-                await asyncio.wait_for(cb(), timeout=CLEANUP_TIMEOUT_S)
-            except asyncio.TimeoutError:
-                log.warning("cleanup callback %s exceeded %.1fs",
-                            getattr(cb, "__name__", repr(cb)), CLEANUP_TIMEOUT_S)
-            except Exception:
-                log.exception("cleanup callback %s raised",
-                              getattr(cb, "__name__", repr(cb)))
+    # Cleanup callbacks now run via the FastMCP lifespan __aexit__,
+    # not here. Both stdio and HTTP get the same path.

@@ -43,11 +43,24 @@ tool-authoring guide.
 | `streamable-http` | `/mcp` on `MCP_HOST:MCP_PORT` | Newer hosted agent harnesses; preferred for HTTP |
 | `sse` | `/sse` + `/messages/` on `MCP_HOST:MCP_PORT` | Older HTTP-based clients still using SSE |
 
-All three use the same tool surface, the same reliability guards, and
-the same per-call timeout. Stdio uses
-[`mcp_server/lifecycle.py`](mcp_server/lifecycle.py) for graceful
-shutdown; HTTP transports rely on uvicorn's built-in graceful drain on
-SIGTERM/SIGINT.
+All three use the same tool surface, reliability guards, per-call
+timeout, and cleanup-callback registry (via the FastMCP `lifespan` in
+[`mcp_server/lifecycle.py`](mcp_server/lifecycle.py)). Stdio adds a
+custom signal handler that closes stdin to defeat the anyio
+reader-thread blocking issue; HTTP relies on uvicorn's built-in
+graceful drain.
+
+### HTTP security
+
+By default HTTP transports bind only to `127.0.0.1` (loopback). To bind
+externally you must pass `--allow-external` (or set
+`MCP_ALLOW_EXTERNAL=1`) — the server refuses to start otherwise.
+
+To require authentication, set `MCP_BEARER_TOKEN`. When set, every HTTP
+request must carry `Authorization: Bearer <token>`; mismatches return
+401 with timing-safe comparison. There is no other built-in auth — for
+production exposure pair the token with TLS termination (reverse proxy
+or sidecar). Verified by [`stress/probe_http_auth.py`](stress/probe_http_auth.py).
 
 ---
 

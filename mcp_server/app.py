@@ -40,8 +40,23 @@ MAX_RESPONSE_BYTES = int(os.environ.get("MCP_MAX_RESPONSE_BYTES", 256 * 1024))
 # connections, cursors, locks, etc).
 DEFAULT_TOOL_TIMEOUT_S = float(os.environ.get("MCP_TOOL_TIMEOUT_S", "30"))
 
+# ---- in-flight tool counter ---------------------------------------------
+# Counts tool tasks specifically, not asyncio.all_tasks() which would
+# include uvicorn workers, FastMCP internals, etc. Incremented in _guard
+# on tool entry, decremented in finally on exit. Single-threaded
+# asyncio means no lock needed.
+_in_flight_tools: int = 0
+
+
+def in_flight_tool_count() -> int:
+    return _in_flight_tools
+
 # ---- FastMCP instance ---------------------------------------------------
-mcp = FastMCP("databricks-ai-steward")
+# Lazy import to avoid circular: lifecycle imports nothing from us, so
+# this is safe.
+from mcp_server.lifecycle import lifespan as _lifespan  # noqa: E402
+
+mcp = FastMCP("databricks-ai-steward", lifespan=_lifespan)
 
 
 def _error(error_type: str, message: str) -> dict:
@@ -81,6 +96,8 @@ def _guard(func: Callable, *, timeout_s: float | None = None) -> Callable:
 
         @functools.wraps(func)
         async def wrapper(*args, **kwargs):
+            global _in_flight_tools
+            _in_flight_tools += 1
             try:
                 if timeout_s is None:
                     result = await func(*args, **kwargs)
@@ -97,18 +114,26 @@ def _guard(func: Callable, *, timeout_s: float | None = None) -> Callable:
             except Exception as e:
                 log.exception("tool raised: %s", func.__name__)
                 return _error(type(e).__name__, str(e))
-            return _cap_response(result)
+            else:
+                return _cap_response(result)
+            finally:
+                _in_flight_tools -= 1
 
         return wrapper
 
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
+        global _in_flight_tools
+        _in_flight_tools += 1
         try:
             result = func(*args, **kwargs)
         except Exception as e:
             log.exception("tool raised: %s", func.__name__)
             return _error(type(e).__name__, str(e))
-        return _cap_response(result)
+        else:
+            return _cap_response(result)
+        finally:
+            _in_flight_tools -= 1
 
     return wrapper
 

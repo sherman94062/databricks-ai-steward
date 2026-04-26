@@ -91,3 +91,9 @@ These are deliberate choices that may matter for some clients:
   fall through to Python defaults.
 - **HTTP transports use uvicorn's built-in graceful drain.** Default
   uvicorn timeout (`UVICORN_GRACEFUL_TIMEOUT`) applies; we don't override.
+- **HTTP defaults to loopback only.** `MCP_ALLOW_EXTERNAL=1` (or
+  `--allow-external`) is required to bind any non-loopback host.
+- **HTTP has no built-in auth except optional bearer token.** Set
+  `MCP_BEARER_TOKEN` to require `Authorization: Bearer <token>` on
+  every request. Pair with TLS for any external exposure. Clients
+  consuming the HTTP transport must support custom auth headers.

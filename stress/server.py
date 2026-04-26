@@ -18,8 +18,11 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 
 from mcp_server.app import _guard  # reusing the production guard logic
+from mcp_server.lifecycle import lifespan
 
-mcp = FastMCP("stress-test")
+# Reuse the production lifespan so cleanup callbacks fire on both stdio
+# and HTTP shutdown paths (when probes run with --transport flag).
+mcp = FastMCP("stress-test", lifespan=lifespan)
 
 
 # ---- baseline ----------------------------------------------------------
@@ -192,16 +195,33 @@ if __name__ == "__main__":
     # Route stress server's own logs to stderr (the MCP transport owns stdout).
     # We deliberately do NOT protect against tool-level `print()` calls — that's
     # exactly what stdout_pollution_guarded is demonstrating.
+    import argparse
     import logging
+    import os
 
     logging.basicConfig(stream=sys.stderr, level="INFO")
-    # Use the same lifecycle wrapper as production so probes against this
-    # server validate the production graceful-shutdown path.
     from mcp_server.lifecycle import run_with_lifecycle, register_cleanup
 
     async def _stress_cleanup() -> None:
-        # Marker line for probe_restart to grep.
+        # Marker line for restart probes to grep. Fires from FastMCP
+        # lifespan __aexit__, so it runs on stdio AND HTTP shutdown.
         print("STRESS_CLEANUP_RAN", file=sys.stderr, flush=True)
 
     register_cleanup(_stress_cleanup)
-    asyncio.run(run_with_lifecycle(mcp))
+
+    p = argparse.ArgumentParser()
+    p.add_argument("--transport", default=os.environ.get("MCP_TRANSPORT", "stdio"),
+                   choices=["stdio", "sse", "streamable-http"])
+    p.add_argument("--host", default=os.environ.get("MCP_HOST", "127.0.0.1"))
+    p.add_argument("--port", type=int, default=int(os.environ.get("MCP_PORT", "8765")))
+    args = p.parse_args()
+
+    if args.transport == "stdio":
+        asyncio.run(run_with_lifecycle(mcp))
+    else:
+        mcp.settings.host = args.host
+        mcp.settings.port = args.port
+        if args.transport == "sse":
+            asyncio.run(mcp.run_sse_async())
+        else:
+            asyncio.run(mcp.run_streamable_http_async())
