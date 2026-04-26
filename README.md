@@ -135,5 +135,6 @@ python -m stress.probe_d_blast_radius    # sync-tool blast radius
 | [`WALKTHROUGH.md`](WALKTHROUGH.md) | Setup and tool-authoring guide |
 | [`FLOW.md`](FLOW.md) | How requests move through the system |
 | [`STRESS_FINDINGS.md`](STRESS_FINDINGS.md) | Empirical issues found via the stress harnesses, with reproductions and fixes |
+| [`COMPATIBILITY.md`](COMPATIBILITY.md) | Client/framework compatibility matrix — what's been tested and what's pending |
 | [`FAILURE_MODES.md`](FAILURE_MODES.md) | Catalog of failure modes covered by the fault-injection harness |
 | [`AGENTS.md`](AGENTS.md) | Original goal statement (pre-Claude Code) |
