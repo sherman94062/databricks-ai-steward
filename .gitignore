@@ -5,3 +5,6 @@
 # python
 .venv
 __pycache__/
+
+# editor / agent harness configs (machine-specific paths)
+.cursor/mcp.json

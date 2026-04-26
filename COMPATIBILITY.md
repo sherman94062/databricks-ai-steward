@@ -18,6 +18,7 @@ server, on which transport, and what worked. Keep this honest:
 | MCP TypeScript SDK Client | streamable-http | 2026-04-26 | ✓ | ✓ | Same probe |
 | Goose (Block) CLI 1.32.0 | stdio | 2026-04-26 | ✓ | partial | Extension loaded cleanly, session ran with our server registered. Tool invocation via LLM not run end-to-end (would require fresh keychain auth grant + Anthropic credits). See "Goose recipe" below. |
 | Claude Desktop (macOS) | stdio | 2026-04-26 | recipe | recipe | Config registered in `~/Library/Application Support/Claude/claude_desktop_config.json`. JSON validated. Live UI verification requires Claude Desktop quit-and-relaunch — see "Claude Desktop recipe" below. |
+| Cursor (macOS) | stdio | 2026-04-26 | recipe | recipe | Config registered in this repo's `.cursor/mcp.json` (gitignored). JSON validated. Live UI verification requires Cursor reload — see "Cursor recipe" below. |
 
 The MCP Inspector pass is the strongest single signal — it is the
 reference debugging tool from the MCP team and exercises the spec
@@ -37,7 +38,6 @@ evidence those clients should also work.
 
 | Client | Transport | Priority |
 |---|---|---|
-| Cursor | stdio | High — IDE adoption is broad |
 | Cline (VS Code) | stdio | High — popular dev workflow |
 | LangChain MCP adapters | stdio | Medium — agent framework wrapper |
 | LangGraph | via LangChain | Low — same SDK underneath |
@@ -63,6 +63,54 @@ python -m stress.probe_http_transport
 ```
 
 Both probes are runnable in CI once Node is available on the runner.
+
+---
+
+## Cursor recipe
+
+Cursor (the IDE) reads MCP server registrations from one of two
+locations:
+- **Global** (all projects): `~/.cursor/mcp.json`
+- **Project** (this repo only): `.cursor/mcp.json` at the repo root
+
+The format is identical to Claude Desktop. Project-level is preferred
+for portfolios because the registration travels with the repo (note
+the actual file is gitignored because it contains a machine-specific
+absolute path; commit a `.cursor/mcp.json.example` if you want to
+share):
+
+```json
+{
+  "mcpServers": {
+    "databricks-steward": {
+      "command": "/absolute/path/to/.venv/bin/python",
+      "args": ["-m", "mcp_server.server"]
+    }
+  }
+}
+```
+
+After editing, reload Cursor (Cmd+Shift+P → *Developer: Reload Window*,
+or fully quit and relaunch). Cursor only spawns MCP server subprocesses
+on reload.
+
+**To verify in the UI:**
+1. Open Cursor Settings (Cmd+,) → search for "MCP" or click the *MCP*
+   tab.
+2. `databricks-steward` should appear in the list with a green
+   "connected" indicator and the discovered tool count (2: `health`,
+   `list_catalogs`).
+3. Open Composer or the chat sidebar and ask Cursor's agent: *"use
+   the databricks-steward MCP server's list_catalogs tool"*. It
+   should call the tool and show the catalog list.
+
+**To remove**: edit `.cursor/mcp.json` to drop the entry, or delete
+the file entirely. Reload.
+
+**Troubleshooting**: if the server doesn't connect, the MCP tab in
+Cursor settings shows a red status with the spawned subprocess's
+stderr. Common causes are the same as Claude Desktop: wrong `command`
+path, or a JSON typo.
 
 ---
 
