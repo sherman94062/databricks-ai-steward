@@ -59,8 +59,26 @@ from mcp_server.lifecycle import lifespan as _lifespan  # noqa: E402
 mcp = FastMCP("databricks-ai-steward", lifespan=_lifespan)
 
 
+def _scrub(message: str) -> str:
+    """Redact known secrets from a string before it leaves the process.
+
+    Reads DATABRICKS_HOST, DATABRICKS_TOKEN, and MCP_BEARER_TOKEN from
+    the environment at call time so .env reloads pick up new values.
+    Defense in depth: SDK errors *shouldn't* embed credentials, but if
+    one ever does, the structured-error path is the last gate before
+    the message reaches the MCP client.
+    """
+    if not isinstance(message, str):
+        return message
+    for var in ("DATABRICKS_TOKEN", "MCP_BEARER_TOKEN", "DATABRICKS_HOST"):
+        secret = os.environ.get(var, "").strip()
+        if secret and len(secret) >= 8:  # avoid scrubbing trivially short values
+            message = message.replace(secret, f"<redacted:{var}>")
+    return message
+
+
 def _error(error_type: str, message: str) -> dict:
-    return {"error": {"type": error_type, "message": message}}
+    return {"error": {"type": error_type, "message": _scrub(message)}}
 
 
 def _cap_response(result: Any) -> Any:
@@ -102,15 +120,25 @@ def _guard(func: Callable, *, timeout_s: float | None = None) -> Callable:
                 if timeout_s is None:
                     result = await func(*args, **kwargs)
                 else:
-                    result = await asyncio.wait_for(
-                        func(*args, **kwargs), timeout=timeout_s
-                    )
-            except asyncio.TimeoutError:
-                log.warning("tool exceeded %.1fs timeout: %s", timeout_s, func.__name__)
-                return _error(
-                    "ToolTimeout",
-                    f"tool exceeded {timeout_s}s timeout and was cancelled server-side",
-                )
+                    # asyncio.timeout's `cm.expired()` is the only reliable way
+                    # to distinguish *our* deadline from a TimeoutError raised
+                    # by the tool itself (e.g. databricks-sdk's OperationTimeout
+                    # subclasses TimeoutError). Without this, every SDK timeout
+                    # would be misreported as our ToolTimeout.
+                    try:
+                        async with asyncio.timeout(timeout_s) as cm:
+                            result = await func(*args, **kwargs)
+                    except TimeoutError:
+                        if cm.expired():
+                            log.warning(
+                                "tool exceeded %.1fs timeout: %s",
+                                timeout_s, func.__name__,
+                            )
+                            return _error(
+                                "ToolTimeout",
+                                f"tool exceeded {timeout_s}s timeout and was cancelled server-side",
+                            )
+                        raise  # tool itself raised TimeoutError — let the generic handler classify
             except Exception as e:
                 log.exception("tool raised: %s", func.__name__)
                 return _error(type(e).__name__, str(e))
