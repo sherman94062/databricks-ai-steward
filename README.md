@@ -78,6 +78,10 @@ or sidecar). Verified by [`stress/probe_http_auth.py`](stress/probe_http_auth.py
 | `list_catalogs` | live | Enumerate Unity Catalog catalogs (real `databricks-sdk` call) |
 | `health` | live | Server liveness + drain-state introspection |
 | `execute_sql_safe` | live | Run SELECT/EXPLAIN/SHOW/DESCRIBE against Databricks SQL with sqlglot governance + row cap + statement timeout |
+| `list_system_tables` | live | Enumerate readable tables in the `system` catalog via `system.information_schema.tables` |
+| `recent_audit_events` | live (warehouse-bound) | Recent rows from `system.access.audit`. May time out on small warehouses with high event volume — see tool docstring |
+| `recent_query_history` | live | Recent rows from `system.query.history` |
+| `billing_summary` | live | DBU consumption from `system.billing.usage`, grouped by SKU |
 | `list_tables` | planned | Thin wrapper over `execute_sql_safe` (`SHOW TABLES IN ...`) |
 | `describe_table` | planned | Thin wrapper over `execute_sql_safe` (`DESCRIBE EXTENDED ...`) |
 | `sample_table` | planned | Thin wrapper over `execute_sql_safe` (bounded `SELECT *`) |

@@ -53,6 +53,7 @@ per-tool sub-credentialing yet.
 | Caller submits DML/DDL/multi-statement SQL | `mcp_server/databricks/sql_safety.py` parses with sqlglot and rejects everything that isn't SELECT/EXPLAIN/SHOW/DESCRIBE before any workspace contact | `test_sql_safety.py` (~25 cases) + `test_sql_tools.py` (mocked SDK) + `probe_sql_governance` (live workspace, tripwire confirms 0 SDK calls for 13 forbidden statement classes) |
 | Caller asks for unbounded rows | `MCP_SQL_ROW_LIMIT` (default 100) and `MCP_SQL_HARD_ROW_LIMIT` (default 1000) cap server-side via the SDK's `row_limit` parameter; response carries `truncated` when the cap fired | `test_sql_tools.py::test_row_limit_capped_at_hard_ceiling` |
 | Slow query holds the session forever | `MCP_SQL_WAIT_TIMEOUT_S` (default 25 s, capped at Databricks' 50 s ceiling) + `on_wait_timeout=CANCEL` aborts the statement server-side and returns a structured error; outer per-tool `MCP_TOOL_TIMEOUT_S` is the second gate | `probe_sql_concurrency` (mixed fast + slow workload; fast calls keep their latency profile while the slow one is cancelled) |
+| System-table tools leak data the caller's PAT shouldn't see | `list_system_tables` / `recent_audit_events` / `recent_query_history` / `billing_summary` use `system.information_schema.tables` and rely on Unity Catalog grants — invisible schemas just don't appear. Same per-tool 60 s ceiling. Args are int-validated and clamped before SQL construction. | `test_system_table_tools.py` (arg clamping + passthrough error mapping + reshape) |
 
 ---
 
@@ -88,7 +89,19 @@ per-tool sub-credentialing yet.
    ships, the server-side per-tool timeout is the only thing bounding
    leak windows. Tune `MCP_TOOL_TIMEOUT_S` to match your tools' real
    p99.
-5. **Concurrent SQL grows the connection pool.** `probe_sql_concurrency`
+5. **`recent_audit_events` is warehouse-bound.** On Databricks Free
+   Edition with a 2X-Small Serverless Starter, the audit table query
+   reliably exceeds Databricks' 50 s synchronous-execution ceiling
+   even with partition pruning by `event_date`, returning
+   `StatementFailed: CANCELED`. The other system-table tools
+   (`list_system_tables`, `recent_query_history`, `billing_summary`)
+   work fine on the same warehouse. Workarounds: tighten predicates
+   via `execute_sql_safe` directly (e.g.
+   `WHERE service_name = 'unityCatalog'`), or upgrade the warehouse.
+   Workaround does not change the threat model — same governance
+   gate, same row caps.
+
+6. **Concurrent SQL grows the connection pool.** `probe_sql_concurrency`
    shows ~2 fds and ~3 MB RSS per concurrent in-flight `execute_sql_safe`
    call (httpx pool growing to support per-statement HTTPS streams).
    Bounded — not a leak — but means heavy SQL concurrency under a single
@@ -96,7 +109,7 @@ per-tool sub-credentialing yet.
    Worth knowing if you ever expose this server to many simultaneous
    agents.
 
-6. **No server-side rate limit.** A misbehaving client can spam tool
+7. **No server-side rate limit.** A misbehaving client can spam tool
    calls up to the workspace's API rate limit, then start eating 429s.
    What does happen for free, before our code sees the error:
    - **Databricks** returns `429 Too Many Requests` with a
