@@ -65,6 +65,7 @@ per-tool sub-credentialing yet.
 | **Audit logging of every tool call** | Currently no persistent log of *which agent invoked what tool with what args*. Planned in the `governance/` slice; until then, supervisors must rely on Databricks-side audit logs. |
 | **Supply-chain attack on `databricks-sdk` / `mcp` / `uvicorn`** | We pin floors but not ceilings. Re-evaluate if any of these dependencies have a known compromise. |
 | **Long-running soak (hours)** | The 1000-call soak runs ~5 minutes. Memory growth at hour-scale is unverified. Run again before any production deployment. |
+| **Server-side rate limit / quota enforcement** | Deliberately deferred. With one read-only metadata tool (`list_catalogs`) the worst case is workspace 429s, which the SDK auto-retries (see below) and which we surface as a structured `TooManyRequests` error. The cost-bearing case is `execute_sql_safe` — that's the slice where a per-tool token-bucket limiter (e.g. 5/min for SQL execution, 50/min for metadata reads) becomes load-bearing. Will revisit when `execute_sql_safe` lands. |
 
 ---
 
@@ -84,9 +85,24 @@ per-tool sub-credentialing yet.
    ships, the server-side per-tool timeout is the only thing bounding
    leak windows. Tune `MCP_TOOL_TIMEOUT_S` to match your tools' real
    p99.
-5. **No DoS rate limit.** A misbehaving client can spam tool calls up
-   to the workspace's API rate limit, then start eating 429s. Cost-side
-   risk is bounded by the workspace's quota, not by us.
+5. **No server-side rate limit.** A misbehaving client can spam tool
+   calls up to the workspace's API rate limit, then start eating 429s.
+   What does happen for free, before our code sees the error:
+   - **Databricks** returns `429 Too Many Requests` with a
+     `Retry-After` header when limits are hit. Per-endpoint and
+     per-plan; not centrally documented.
+   - **`databricks-sdk`** has a `_RetryAfterCustomizer` that respects
+     `Retry-After` and auto-retries idempotent operations (visible at
+     `databricks/sdk/errors/customizer.py` in the installed SDK). So a
+     transient burst usually self-heals before reaching us.
+   - **This server** surfaces persistent 429s (after the SDK gives up)
+     as a structured `TooManyRequests` error via `_guard`. Covered by
+     `test_databricks_faults.py::test_sdk_error_becomes_structured_response[429_rate_limit]`.
+
+   What we don't have: a *server-side* token bucket that protects
+   workspace quota (and SQL-warehouse cost) when `execute_sql_safe`
+   eventually lands. Tracked under "Out of scope" with an explicit
+   reactivation trigger.
 
 ---
 
