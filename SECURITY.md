@@ -54,6 +54,9 @@ per-tool sub-credentialing yet.
 | Caller asks for unbounded rows | `MCP_SQL_ROW_LIMIT` (default 100) and `MCP_SQL_HARD_ROW_LIMIT` (default 1000) cap server-side via the SDK's `row_limit` parameter; response carries `truncated` when the cap fired | `test_sql_tools.py::test_row_limit_capped_at_hard_ceiling` |
 | Slow query holds the session forever | `MCP_SQL_WAIT_TIMEOUT_S` (default 25 s, capped at Databricks' 50 s ceiling) + `on_wait_timeout=CANCEL` aborts the statement server-side and returns a structured error; outer per-tool `MCP_TOOL_TIMEOUT_S` is the second gate | `probe_sql_concurrency` (mixed fast + slow workload; fast calls keep their latency profile while the slow one is cancelled) |
 | System-table tools leak data the caller's PAT shouldn't see | `list_system_tables` / `recent_audit_events` / `recent_query_history` / `billing_summary` use `system.information_schema.tables` and rely on Unity Catalog grants — invisible schemas just don't appear. Same per-tool 60 s ceiling. Args are int-validated and clamped before SQL construction. | `test_system_table_tools.py` (arg clamping + passthrough error mapping + reshape) |
+| No persistent record of who called what | Every tool call emits a JSONL audit pair (`tool.start` + `tool.end`) sharing a `request_id`. Records carry caller identity, latency, outcome, error type, response bytes. Argument *values* are not logged (only names + a digest) to avoid exfiltrating SQL bodies or table FQNs through the audit channel. Configurable via `MCP_AUDIT_LOG_PATH`. | `test_audit_and_rate_limit.py` (start/end pairing, error outcome, value redaction, caller_id propagation) |
+| Compromised / prompt-injected agent enumerates the workspace | Per-(tool, caller) sliding-window rate limiter charged on entry, not completion. Defaults: `execute_sql_safe` 5/min, audit/billing/query-history tools 10/min, metadata 50/min. Override via `MCP_RATE_LIMIT`. | `test_audit_and_rate_limit.py::test_rate_limit_*` (refusal after quota, per-caller isolation, charges on tool failure) |
+| Databricks audit trail can't attribute statements to the originating agent | `execute_sql_safe` (and the system-table wrappers, which route through it) tags every Databricks statement with `query_tags=[mcp_caller=<id>, mcp_source=databricks-ai-steward]`. The caller id propagates to the workspace's own `system.query.history` and the SQL warehouse UI. | `test_sql_tools.py::test_caller_id_propagates_to_databricks_query_tags` |
 
 ---
 
@@ -61,15 +64,15 @@ per-tool sub-credentialing yet.
 
 | Threat | Why out of scope today |
 |---|---|
-| **Prompt-injected LLM client enumerates Databricks** | A compromised AI client can drive the server to call any tool. The server is a faithful executor — preventing the client from being adversarial is the client's job, not ours. Mitigation lives in the planned `governance/` layer (per-tool ACLs, audit log, rate limit). |
+| **Prompt-injected LLM client enumerates Databricks** | A compromised AI client can drive the server to call any tool. Two of the three mitigations are now in place: per-(tool, caller) rate limiter (default 5/min for `execute_sql_safe`) bounds the volume; per-call audit log captures every attempt for after-the-fact forensics. The third — per-tool sub-credentials — is still future work. The server is a faithful executor; preventing the client from being adversarial in the first place is the client's job. |
 | **OS-level container / sandbox escape** | Server runs with the user's full shell privileges. Sandboxing belongs to the deployment, not the application. |
 | **PAT theft from disk** | `.env` is gitignored + chmod 600, but anyone with read access to the user's home directory can read it. Token rotation is the mitigation. |
 | **HTTPS termination / mTLS** | HTTP transport intentionally serves plain HTTP. Production deployment expects a reverse proxy or sidecar to terminate TLS. |
 | **Per-tool sub-credentials** | One PAT shared across all tools. When `execute_sql_safe` lands the steward should be able to issue a more limited token per-call — not yet implemented. |
-| **Audit logging of every tool call** | Currently no persistent log of *which agent invoked what tool with what args*. Planned in the `governance/` slice; until then, supervisors must rely on Databricks-side audit logs. |
+| ~~**Audit logging of every tool call**~~ — **shipped.** | JSONL via `MCP_AUDIT_LOG_PATH` (or stderr). Argument *values* are deliberately excluded — only argument names + a digest are recorded. Full-fidelity forensic replay still needs Databricks-side audit. |
 | **Supply-chain attack on `databricks-sdk` / `mcp` / `uvicorn`** | We pin floors but not ceilings. Re-evaluate if any of these dependencies have a known compromise. |
 | **Long-running soak (hours)** | The 1000-call soak runs ~5 minutes. Memory growth at hour-scale is unverified. Run again before any production deployment. |
-| **Server-side rate limit / quota enforcement** | **Reactivation pending.** Was deferred while the only tool was `list_catalogs`; `execute_sql_safe` has now landed, which is the cost-bearing case. Today we still rely on Databricks' own 429s + the SDK's `_RetryAfterCustomizer`. Next concrete step: add a per-tool token-bucket limiter (e.g. 5/min for `execute_sql_safe`, 50/min for metadata reads) before any production deployment. |
+| ~~**Server-side rate limit / quota enforcement**~~ — **shipped.** | In-process token-bucket per `(tool, caller)`. Defaults: `execute_sql_safe` 5/min, audit/billing/query-history 10/min, metadata 50/min. Override via `MCP_RATE_LIMIT="tool=N/W,*=N/W"`. Multi-replica deployments would need a shared backend (Redis); the surface stays the same. |
 
 ---
 
@@ -78,9 +81,15 @@ per-tool sub-credentialing yet.
 1. **Single PAT, no per-tool ACL.** Every tool inherits the workspace
    user's full permissions. Once `execute_sql_safe` lands, this becomes
    the load-bearing question.
-2. **No persistent audit trail.** The structured stderr log captures
-   warnings + errors but not full call history. `mcp_server.app.log`
-   inherits the level from `MCP_LOG_LEVEL` and writes to stderr only.
+2. **Audit log is per-process.** Each MCP server subprocess writes its
+   own JSONL file (or stderr stream). Multi-replica HTTP deployments
+   need a log shipper (Vector / Filebeat / Fluent Bit) to aggregate;
+   the records are already in a JSONL shape that's friendly to those.
+   Argument *values* are deliberately not logged — only names + a
+   short digest — to avoid exfiltrating SQL bodies, table FQNs, and
+   other workspace internals through the audit channel itself. Full
+   forensic replay still needs Databricks-side audit
+   (`system.access.audit` and `system.query.history`).
 3. **Bearer auth is bring-your-own.** No built-in identity provider, no
    token rotation, no per-caller scope. Pair with a reverse proxy for
    anything beyond loopback dev use.
@@ -146,6 +155,11 @@ per-tool sub-credentialing yet.
 | `MCP_SQL_ROW_LIMIT` | Default per-call row cap for `execute_sql_safe` | `100` |
 | `MCP_SQL_HARD_ROW_LIMIT` | Hard ceiling — caller-supplied `row_limit` is silently capped to this | `1000` |
 | `MCP_SQL_WAIT_TIMEOUT_S` | Server-side `wait_timeout` passed to the Databricks Statement Execution API; `on_wait_timeout=CANCEL` aborts the statement at this deadline | `25` |
+| `MCP_AUDIT_LOG_PATH` | Append-only JSONL audit log path. If unset, audit goes to stderr only. | unset |
+| `MCP_AUDIT_DISABLE_STDERR` | If `1`, suppress audit-log emission to stderr (file write still happens). Useful when a sidecar log shipper is reading the JSONL file. | unset |
+| `MCP_CALLER_ID` | Default caller identity for this process. Overridden per-request by transport-layer hooks (e.g. bearer-auth middleware). | `unknown` |
+| `MCP_BEARER_TOKEN_NAME` | Caller identity used in audit + Databricks `query_tags` when a request authenticates with `MCP_BEARER_TOKEN`. | `bearer-authenticated` |
+| `MCP_RATE_LIMIT` | Per-tool overrides, e.g. `execute_sql_safe=10/60,*=200/60`. Each entry is `tool=count/window_seconds`; `*` matches any tool not explicitly listed. | (defaults applied) |
 | `MCP_SHUTDOWN_GRACE_S` | Stdio graceful shutdown deadline | `5` |
 | `MCP_CLEANUP_TIMEOUT_S` | Per cleanup-callback deadline | `2` |
 | `MCP_LOG_LEVEL` | Logger level (stderr only) | `WARNING` |

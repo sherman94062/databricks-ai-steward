@@ -20,6 +20,7 @@ import asyncio
 import sys
 from unittest.mock import MagicMock
 
+from mcp_server import audit, rate_limit
 from mcp_server.databricks import client as db_client
 from mcp_server.tools.sql_tools import execute_sql_safe
 
@@ -54,7 +55,12 @@ async def main() -> int:
 
     fails: list[str] = []
     try:
+        token = audit.set_caller_id("probe-sql-governance")
         for label, sql in FORBIDDEN_STATEMENTS:
+            # Reset the rate limiter before each case — we're testing
+            # the governance gate in isolation, not its interaction with
+            # the limiter (the limiter has its own dedicated tests).
+            rate_limit.reset_for_tests()
             r = await execute_sql_safe(sql)
             ok = (
                 isinstance(r, dict)
@@ -74,7 +80,9 @@ async def main() -> int:
         if execute_called != 0:
             fails.append("tripwire-fired")
     finally:
+        audit.reset_caller_id(token)
         db_client.set_workspace_for_tests(None)
+        rate_limit.reset_for_tests()
 
     print()
     if not fails:

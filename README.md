@@ -121,6 +121,21 @@ Every tool registered via `safe_tool()` (in `mcp_server/app.py`) gets:
 6. **Health/introspection tool** — `health` reports `{status, ready,
    version, uptime_s, in_flight_tasks}` and flips `ready` to false
    during shutdown so supervisors / probes can detect drain state.
+7. **Audit log of every tool call** — JSONL records (`tool.start` +
+   `tool.end` sharing a `request_id`) carry caller id, latency,
+   outcome, error type, response bytes. Argument *values* are not
+   logged (only names + a digest) so SQL bodies don't leak through
+   the audit channel. Configurable file path via `MCP_AUDIT_LOG_PATH`;
+   stderr by default.
+8. **Per-(tool, caller) rate limit** — token bucket charged on entry.
+   Default ceilings: `execute_sql_safe` 5/min, audit/billing
+   tools 10/min, metadata 50/min. Override via `MCP_RATE_LIMIT`.
+   Bounds the blast radius of a prompt-injected agent.
+9. **Caller identity propagation to Databricks** — every Databricks
+   statement is tagged with `mcp_caller=<id>`, visible in
+   `system.query.history` and the workspace UI. Lets a human auditor
+   attribute statements to the agent that triggered them, even though
+   every statement runs under the same PAT.
 
 ---
 

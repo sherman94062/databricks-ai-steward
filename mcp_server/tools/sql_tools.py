@@ -21,11 +21,13 @@ from typing import Any
 from databricks.sdk.service.sql import (
     Disposition,
     Format,
+    QueryTag,
     StatementState,
     ExecuteStatementRequestOnWaitTimeout,
 )
 
 from mcp_server.app import safe_tool
+from mcp_server.audit import current_caller_id
 from mcp_server.databricks.client import (
     WarehouseUnavailable,
     get_workspace,
@@ -71,6 +73,16 @@ def _statement_to_payload(resp, requested_limit: int) -> dict:
 def _execute_blocking(sql: str, warehouse_id: str, row_limit: int, wait_timeout_s: int):
     """Synchronous SDK call. Wrap with run_in_thread."""
     ws = get_workspace()
+    # query_tags propagates the MCP caller identity (set per-call by the
+    # transport layer's audit hook) into Databricks' own audit trail —
+    # `system.query.history` and the workspace UI both surface these
+    # tags, so a human auditor can attribute statements to the agent
+    # that triggered them, even though every statement runs under the
+    # same PAT.
+    tags = [
+        QueryTag(key="mcp_caller", value=current_caller_id()),
+        QueryTag(key="mcp_source", value="databricks-ai-steward"),
+    ]
     return ws.statement_execution.execute_statement(
         statement=sql,
         warehouse_id=warehouse_id,
@@ -79,6 +91,7 @@ def _execute_blocking(sql: str, warehouse_id: str, row_limit: int, wait_timeout_
         on_wait_timeout=ExecuteStatementRequestOnWaitTimeout.CANCEL,
         disposition=Disposition.INLINE,
         format=Format.JSON_ARRAY,
+        query_tags=tags,
     )
 
 

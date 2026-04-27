@@ -127,6 +127,29 @@ async def test_sdk_exception_lands_through_guard(mock_workspace):
 
 
 @pytest.mark.asyncio
+async def test_caller_id_propagates_to_databricks_query_tags(mock_workspace):
+    """The MCP caller identity is set per-request via a contextvar and
+    must reach Databricks as `query_tags` so the workspace's own audit
+    trail can attribute statements to the agent that triggered them."""
+    from mcp_server import audit
+
+    mock_workspace.statement_execution.execute_statement.return_value = (
+        _success_response(rows=[], columns=[("x", "INT")])
+    )
+    token = audit.set_caller_id("agent-alpha")
+    try:
+        await sql_tools.execute_sql_safe("SELECT 1")
+    finally:
+        audit.reset_caller_id(token)
+
+    call_kwargs = mock_workspace.statement_execution.execute_statement.call_args.kwargs
+    tags = call_kwargs.get("query_tags") or []
+    by_key = {t.key: t.value for t in tags}
+    assert by_key.get("mcp_caller") == "agent-alpha"
+    assert by_key.get("mcp_source") == "databricks-ai-steward"
+
+
+@pytest.mark.asyncio
 async def test_warehouse_unavailable_becomes_structured_error(monkeypatch, mock_workspace):
     from mcp_server.databricks.client import WarehouseUnavailable
 

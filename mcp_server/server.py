@@ -71,10 +71,14 @@ def _build_starlette_app(transport: str):
         app = mcp.streamable_http_app()
 
     token = os.environ.get("MCP_BEARER_TOKEN", "").strip()
-    if token:
-        from starlette.middleware.base import BaseHTTPMiddleware
-        from starlette.responses import JSONResponse
+    bearer_caller = os.environ.get("MCP_BEARER_TOKEN_NAME", "").strip() or "bearer-authenticated"
 
+    from starlette.middleware.base import BaseHTTPMiddleware
+    from starlette.responses import JSONResponse
+
+    from mcp_server import audit
+
+    if token:
         expected = f"Bearer {token}"
 
         class _BearerAuth(BaseHTTPMiddleware):
@@ -86,10 +90,18 @@ def _build_starlette_app(transport: str):
                         status_code=401,
                         headers={"WWW-Authenticate": 'Bearer realm="mcp"'},
                     )
-                return await call_next(request)
+                # Authenticated — set caller identity for the audit/
+                # rate-limit hooks downstream. contextvars survives across
+                # the await chain that handles this request.
+                token_obj = audit.set_caller_id(bearer_caller)
+                try:
+                    return await call_next(request)
+                finally:
+                    audit.reset_caller_id(token_obj)
 
         app.add_middleware(_BearerAuth)
-        log.warning("bearer auth enabled (token len=%d)", len(token))
+        log.warning("bearer auth enabled (token len=%d, caller_id=%r)",
+                    len(token), bearer_caller)
     else:
         log.warning("bearer auth NOT enabled (set MCP_BEARER_TOKEN to enable)")
 

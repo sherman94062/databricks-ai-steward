@@ -109,13 +109,52 @@ def _cap_response(result: Any) -> Any:
 def _guard(func: Callable, *, timeout_s: float | None = None) -> Callable:
     """Wrap a tool function so exceptions, oversize returns, and (for async
     tools) timeouts become structured error responses instead of killing the
-    server or leaking suspended coroutines."""
+    server or leaking suspended coroutines.
+
+    Also: rate-limits per (tool, caller_id) and emits an audit record at
+    start + end of every call. Both are cross-cutting concerns that
+    every tool needs uniformly; the alternative (per-tool wiring) drifts.
+    """
+    # Local imports to avoid pulling audit/rate_limit at app.py module
+    # load time — keeps app.py importable from contexts that don't want
+    # those side effects (e.g. some unit tests).
+    from mcp_server import audit, rate_limit
+
     if inspect.iscoroutinefunction(func):
 
         @functools.wraps(func)
         async def wrapper(*args, **kwargs):
             global _in_flight_tools
             _in_flight_tools += 1
+            tool_name = func.__name__
+            request_id = audit.new_request_id()
+            audit.emit_tool_start(tool_name, request_id, args, kwargs)
+            t0 = asyncio.get_event_loop().time()
+
+            # 1. Rate-limit gate. Charged before the tool runs so that
+            #    a runaway caller can't exceed quota by N concurrent
+            #    in-flight calls; the bucket is incremented on entry,
+            #    not on completion.
+            try:
+                await rate_limit.check(tool_name, audit.current_caller_id())
+            except rate_limit.RateLimitExceeded as e:
+                audit.emit_rate_limit_exceeded(
+                    tool_name, request_id, e.limit.count, e.limit.window_s,
+                )
+                resp = _error(
+                    "RateLimitExceeded",
+                    f"rate limit: {e.limit.count} calls per {e.limit.window_s}s "
+                    f"for {tool_name!r} per caller",
+                )
+                latency_ms = (asyncio.get_event_loop().time() - t0) * 1000
+                audit.emit_tool_end(
+                    tool_name, request_id, latency_ms,
+                    outcome="rate_limited",
+                    error_type="RateLimitExceeded",
+                )
+                _in_flight_tools -= 1
+                return resp
+
             try:
                 if timeout_s is None:
                     result = await func(*args, **kwargs)
@@ -141,9 +180,33 @@ def _guard(func: Callable, *, timeout_s: float | None = None) -> Callable:
                         raise  # tool itself raised TimeoutError — let the generic handler classify
             except Exception as e:
                 log.exception("tool raised: %s", func.__name__)
-                return _error(type(e).__name__, str(e))
+                resp = _error(type(e).__name__, str(e))
+                latency_ms = (asyncio.get_event_loop().time() - t0) * 1000
+                audit.emit_tool_end(
+                    tool_name, request_id, latency_ms,
+                    outcome="error", error_type=type(e).__name__,
+                )
+                return resp
             else:
-                return _cap_response(result)
+                capped = _cap_response(result)
+                latency_ms = (asyncio.get_event_loop().time() - t0) * 1000
+                error_type = None
+                if isinstance(capped, dict) and "error" in capped:
+                    err = capped["error"]
+                    if isinstance(err, dict):
+                        error_type = err.get("type")
+                outcome = "error" if error_type else "success"
+                response_bytes = None
+                try:
+                    response_bytes = len(json.dumps(capped, default=str))
+                except Exception:
+                    pass
+                audit.emit_tool_end(
+                    tool_name, request_id, latency_ms,
+                    outcome=outcome, error_type=error_type,
+                    response_bytes=response_bytes,
+                )
+                return capped
             finally:
                 _in_flight_tools -= 1
 

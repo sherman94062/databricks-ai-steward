@@ -56,9 +56,14 @@ def _verify_tools_list(stdout: str) -> bool:
     try:
         data = json.loads(stdout)
         names = sorted(t["name"] for t in data.get("tools", []))
+        # Don't assert exact membership — the tool surface grows as the
+        # project does. Require the small set we know is always there.
+        required = {"health", "list_catalogs"}
+        ok = required.issubset(set(names))
         return _check(
-            "tools/list", names == ["health", "list_catalogs"],
-            f"got {names}",
+            "tools/list", ok,
+            f"got {len(names)} tools, required {sorted(required)} present" if ok
+            else f"missing required tools; got {names}",
         )
     except (json.JSONDecodeError, KeyError, TypeError) as e:
         return _check("tools/list", False, f"parse error: {e}")
