@@ -77,10 +77,10 @@ or sidecar). Verified by [`stress/probe_http_auth.py`](stress/probe_http_auth.py
 |---|---|---|
 | `list_catalogs` | live | Enumerate Unity Catalog catalogs (real `databricks-sdk` call) |
 | `health` | live | Server liveness + drain-state introspection |
-| `list_tables` | planned | Enumerate tables in a catalog / schema |
-| `describe_table` | planned | Return column definitions and metadata |
-| `sample_table` | planned | Return a bounded row sample |
-| `execute_sql_safe` | planned | Run SQL with governance checks (SELECT-only, row caps, PII guards) |
+| `execute_sql_safe` | live | Run SELECT/EXPLAIN/SHOW/DESCRIBE against Databricks SQL with sqlglot governance + row cap + statement timeout |
+| `list_tables` | planned | Thin wrapper over `execute_sql_safe` (`SHOW TABLES IN ...`) |
+| `describe_table` | planned | Thin wrapper over `execute_sql_safe` (`DESCRIBE EXTENDED ...`) |
+| `sample_table` | planned | Thin wrapper over `execute_sql_safe` (bounded `SELECT *`) |
 
 Cross-cutting concerns under construction: SQL safety validation, schema
 discovery, query governance policies, audit logging.

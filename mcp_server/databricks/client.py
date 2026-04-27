@@ -13,12 +13,23 @@ absent the SDK will fall back to a profile.
 from __future__ import annotations
 
 import asyncio
+import os
 from typing import Any, Awaitable, Callable, TypeVar
 
 from databricks.sdk import WorkspaceClient
+from databricks.sdk.service.sql import State as WarehouseState
 
 
 T = TypeVar("T")
+
+
+class WarehouseUnavailable(RuntimeError):
+    """Raised when no Databricks SQL warehouse is reachable for execute_sql_safe.
+
+    Distinguishes the resolver's three failure modes — explicit ID didn't
+    exist, env var pointed at nothing, or no RUNNING warehouse exists —
+    so the tool layer can surface a clean structured error.
+    """
 
 _client: WorkspaceClient | None = None
 
@@ -53,3 +64,41 @@ async def run_in_thread(fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
     runs.
     """
     return await asyncio.to_thread(fn, *args, **kwargs)
+
+
+def resolve_warehouse_id(explicit: str | None = None) -> str:
+    """Resolve a SQL warehouse ID by precedence:
+        1. caller-supplied `explicit` (used as-is, no validation here —
+           SDK will fail loudly if it's bogus)
+        2. MCP_DATABRICKS_WAREHOUSE_ID env var
+        3. first warehouse in workspace whose state is RUNNING
+
+    Raises `WarehouseUnavailable` if all three fail. Synchronous —
+    callers should wrap with `run_in_thread`.
+    """
+    if explicit:
+        return explicit
+
+    from_env = os.environ.get("MCP_DATABRICKS_WAREHOUSE_ID", "").strip()
+    if from_env:
+        return from_env
+
+    ws = get_workspace()
+    running = [
+        w for w in ws.warehouses.list()
+        if w.state == WarehouseState.RUNNING and w.id
+    ]
+    if running:
+        return running[0].id
+
+    # Fallback: any warehouse at all, even if STOPPED — Databricks will
+    # auto-start it on first statement, which is slow but correct.
+    any_wh = [w for w in ws.warehouses.list() if w.id]
+    if any_wh:
+        return any_wh[0].id
+
+    raise WarehouseUnavailable(
+        "no SQL warehouse available — set MCP_DATABRICKS_WAREHOUSE_ID or pass "
+        "warehouse_id explicitly, and confirm at least one warehouse exists in "
+        "the workspace"
+    )

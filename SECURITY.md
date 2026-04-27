@@ -50,6 +50,9 @@ per-tool sub-credentialing yet.
 | HTTP transport accepts unauthenticated calls | Optional `MCP_BEARER_TOKEN` → 401 on missing/wrong, timing-safe compare | `probe_http_auth` |
 | SDK-level failure (401/403/429/500/timeout/network/malformed) crashes the server or leaks internals | All SDK exception types caught by `_guard`, message scrubbed, structured error returned | `test_databricks_faults.py` (parametrised over 10 failure modes) |
 | File descriptor / memory leak under sustained load | httpx client pool reuse via SDK singleton + `asyncio.to_thread` worker pool | `probe_databricks_soak` (1000 calls: fd + 0, RSS + 0.1 MB) |
+| Caller submits DML/DDL/multi-statement SQL | `mcp_server/databricks/sql_safety.py` parses with sqlglot and rejects everything that isn't SELECT/EXPLAIN/SHOW/DESCRIBE before any workspace contact | `test_sql_safety.py` (~25 cases) + `test_sql_tools.py` (mocked SDK) + `probe_sql_governance` (live workspace, tripwire confirms 0 SDK calls for 13 forbidden statement classes) |
+| Caller asks for unbounded rows | `MCP_SQL_ROW_LIMIT` (default 100) and `MCP_SQL_HARD_ROW_LIMIT` (default 1000) cap server-side via the SDK's `row_limit` parameter; response carries `truncated` when the cap fired | `test_sql_tools.py::test_row_limit_capped_at_hard_ceiling` |
+| Slow query holds the session forever | `MCP_SQL_WAIT_TIMEOUT_S` (default 25 s, capped at Databricks' 50 s ceiling) + `on_wait_timeout=CANCEL` aborts the statement server-side and returns a structured error; outer per-tool `MCP_TOOL_TIMEOUT_S` is the second gate | `probe_sql_concurrency` (mixed fast + slow workload; fast calls keep their latency profile while the slow one is cancelled) |
 
 ---
 
@@ -65,7 +68,7 @@ per-tool sub-credentialing yet.
 | **Audit logging of every tool call** | Currently no persistent log of *which agent invoked what tool with what args*. Planned in the `governance/` slice; until then, supervisors must rely on Databricks-side audit logs. |
 | **Supply-chain attack on `databricks-sdk` / `mcp` / `uvicorn`** | We pin floors but not ceilings. Re-evaluate if any of these dependencies have a known compromise. |
 | **Long-running soak (hours)** | The 1000-call soak runs ~5 minutes. Memory growth at hour-scale is unverified. Run again before any production deployment. |
-| **Server-side rate limit / quota enforcement** | Deliberately deferred. With one read-only metadata tool (`list_catalogs`) the worst case is workspace 429s, which the SDK auto-retries (see below) and which we surface as a structured `TooManyRequests` error. The cost-bearing case is `execute_sql_safe` — that's the slice where a per-tool token-bucket limiter (e.g. 5/min for SQL execution, 50/min for metadata reads) becomes load-bearing. Will revisit when `execute_sql_safe` lands. |
+| **Server-side rate limit / quota enforcement** | **Reactivation pending.** Was deferred while the only tool was `list_catalogs`; `execute_sql_safe` has now landed, which is the cost-bearing case. Today we still rely on Databricks' own 429s + the SDK's `_RetryAfterCustomizer`. Next concrete step: add a per-tool token-bucket limiter (e.g. 5/min for `execute_sql_safe`, 50/min for metadata reads) before any production deployment. |
 
 ---
 
@@ -85,7 +88,15 @@ per-tool sub-credentialing yet.
    ships, the server-side per-tool timeout is the only thing bounding
    leak windows. Tune `MCP_TOOL_TIMEOUT_S` to match your tools' real
    p99.
-5. **No server-side rate limit.** A misbehaving client can spam tool
+5. **Concurrent SQL grows the connection pool.** `probe_sql_concurrency`
+   shows ~2 fds and ~3 MB RSS per concurrent in-flight `execute_sql_safe`
+   call (httpx pool growing to support per-statement HTTPS streams).
+   Bounded — not a leak — but means heavy SQL concurrency under a single
+   server process scales by client connections, not by request count.
+   Worth knowing if you ever expose this server to many simultaneous
+   agents.
+
+6. **No server-side rate limit.** A misbehaving client can spam tool
    calls up to the workspace's API rate limit, then start eating 429s.
    What does happen for free, before our code sees the error:
    - **Databricks** returns `429 Too Many Requests` with a
@@ -118,6 +129,10 @@ per-tool sub-credentialing yet.
 | `MCP_PORT` | Bind port for HTTP transports | `8765` |
 | `MCP_MAX_RESPONSE_BYTES` | Cap on tool response size | `262144` (256 KB) |
 | `MCP_TOOL_TIMEOUT_S` | Per-tool server-side timeout | `30` |
+| `MCP_DATABRICKS_WAREHOUSE_ID` | Default SQL warehouse for `execute_sql_safe`. Falls back to first running warehouse if unset. | unset |
+| `MCP_SQL_ROW_LIMIT` | Default per-call row cap for `execute_sql_safe` | `100` |
+| `MCP_SQL_HARD_ROW_LIMIT` | Hard ceiling — caller-supplied `row_limit` is silently capped to this | `1000` |
+| `MCP_SQL_WAIT_TIMEOUT_S` | Server-side `wait_timeout` passed to the Databricks Statement Execution API; `on_wait_timeout=CANCEL` aborts the statement at this deadline | `25` |
 | `MCP_SHUTDOWN_GRACE_S` | Stdio graceful shutdown deadline | `5` |
 | `MCP_CLEANUP_TIMEOUT_S` | Per cleanup-callback deadline | `2` |
 | `MCP_LOG_LEVEL` | Logger level (stderr only) | `WARNING` |
