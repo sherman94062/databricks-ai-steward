@@ -6,14 +6,20 @@ registered with a thin reliability layer (size cap, exception capture,
 per-tool timeout, sync-tool rejection) so a misbehaving tool can't take down
 the stdio session.
 
-> **Status — early integration.** The MCP server is wired to a live
-> Databricks workspace: `list_catalogs` calls the Unity Catalog API
-> (`databricks-sdk`) and returns real catalog metadata. The remaining
-> planned tools (`list_tables`, `describe_table`, `sample_table`,
-> `execute_sql_safe`) are still designed-but-not-implemented. The
-> reliability layer and the stress / compatibility harness are built and
-> exercised — see [`STRESS_FINDINGS.md`](STRESS_FINDINGS.md) and
-> [`COMPATIBILITY.md`](COMPATIBILITY.md).
+> **Status — governed gateway, live against a workspace.** The MCP server
+> is wired to a live Databricks workspace. `execute_sql_safe` runs
+> SELECT/EXPLAIN/SHOW/DESCRIBE statements through a sqlglot governance
+> gate with row caps + statement-timeout cancellation; `list_catalogs`,
+> `list_system_tables`, `recent_query_history`, `recent_audit_events`,
+> and `billing_summary` are live system-table wrappers built on top of
+> it. The remaining thin wrappers (`list_tables`, `describe_table`,
+> `sample_table`) are scaffolding over `execute_sql_safe` — final SDK
+> wiring, not new design work. The reliability layer (audit log,
+> per-tool rate limit, caller-id propagation, graceful drain),
+> production transports (HTTP + bearer auth + per-end-user identity),
+> and stress / compatibility harness are built and exercised — see
+> [`STRESS_FINDINGS.md`](STRESS_FINDINGS.md),
+> [`COMPATIBILITY.md`](COMPATIBILITY.md), and [`SECURITY.md`](SECURITY.md).
 
 ---
 
