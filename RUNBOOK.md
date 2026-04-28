@@ -163,6 +163,49 @@ Full threat-model context is in [`SECURITY.md`](SECURITY.md).
    `request_id` is identical to the one in the audit log so traces
    and audit records correlate one-to-one.
 
+### Tracing a request through the system
+
+The audit log carries three correlation IDs. Together they let you go
+from a single alert to the original SQL execution plan in three jumps:
+
+| ID | Where it appears | What it gets you |
+|---|---|---|
+| `request_id` | every audit record (`tool.start`, `tool.end`, `tool.databricks_statement`); OTel span attributes; Prometheus labels are coarser | identify a single MCP tool call uniquely |
+| `statement_id` | `tool.databricks_statement` audit record; `system.query.history.statement_id` | the Databricks SQL statement that ran |
+| `mcp_caller` | every Databricks `query_tags` value; `system.query.history.statement_text` (when not encrypted) | which agent / human triggered the call |
+
+**Recipe — alert to SQL plan in three jumps**:
+
+1. Alert fires (or 5xx in logs). Pull the `request_id` from the audit
+   record matching the time window:
+
+   ```bash
+   grep '"request_id":"<uuid>"' $MCP_AUDIT_LOG_PATH | jq .
+   ```
+
+   You'll see four records sharing that ID:
+     `tool.start` → `tool.databricks_statement` → `tool.end` (and
+     possibly `tool.rate_limit_exceeded`).
+
+2. Read `statement_id` from the `tool.databricks_statement` record.
+
+3. Open Databricks UI → SQL Warehouses → Query History → search by
+   that `statement_id`. Or query directly:
+
+   ```sql
+   SELECT statement_text, execution_status, total_duration_ms,
+          read_rows, statement_id
+   FROM system.query.history
+   WHERE statement_id = '<statement_id>'
+   ```
+
+   You get the original SQL, plan, and runtime stats.
+
+The chain works the same way in reverse — start from a slow query in
+`system.query.history`, take its `statement_id`, find the matching
+audit records, find the `caller_id`, and you know which agent issued
+it.
+
 ### Suggested alerts
 
 | Alert | PromQL | Why |

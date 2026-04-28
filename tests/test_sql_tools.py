@@ -243,6 +243,36 @@ async def test_deadline_expiry_cancels_at_databricks(mock_workspace, monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_databricks_statement_audit_event_links_request_to_statement(mock_workspace):
+    """Every successful submit emits a `tool.databricks_statement` audit
+    record carrying both the MCP request_id and the Databricks
+    statement_id. That's the correlation an operator follows when
+    tracing an alert from our audit log to system.query.history."""
+    from mcp_server import audit
+
+    mock_workspace.statement_execution.execute_statement.return_value = (
+        _success_response(rows=[["main"]], columns=[("name", "STRING")])
+    )
+
+    with audit.capture() as records:
+        token = audit.set_caller_id("operator-trace")
+        try:
+            await sql_tools.execute_sql_safe("SELECT 1")
+        finally:
+            audit.reset_caller_id(token)
+
+    statement_evt = [r for r in records if r["event"] == "tool.databricks_statement"]
+    assert len(statement_evt) == 1
+    rec = statement_evt[0]
+    assert rec["statement_id"] == "stmt-test"
+    # request_id is the same UUID `_guard` set on tool.start
+    starts = [r for r in records if r["event"] == "tool.start"]
+    assert starts and rec["request_id"] == starts[0]["request_id"]
+    # Tool name attribution
+    assert rec["tool"] == "execute_sql_safe"
+
+
+@pytest.mark.asyncio
 async def test_warehouse_unavailable_becomes_structured_error(monkeypatch, mock_workspace):
     from mcp_server.databricks.client import WarehouseUnavailable
 

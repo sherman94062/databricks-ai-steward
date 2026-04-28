@@ -82,6 +82,27 @@ def current_tool() -> str | None:
     return _current_tool.get()
 
 
+# The MCP request ID for the currently-executing tool call. Set by
+# `_guard`; backend operations (e.g. Databricks statement execution)
+# read it so they can attribute correlation events back to the
+# originating MCP request without plumbing it through every call.
+_current_request_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "mcp_current_request_id", default=None,
+)
+
+
+def set_current_request_id(rid: str) -> contextvars.Token:
+    return _current_request_id.set(rid)
+
+
+def reset_current_request_id(token: contextvars.Token) -> None:
+    _current_request_id.reset(token)
+
+
+def current_request_id() -> str | None:
+    return _current_request_id.get()
+
+
 def new_request_id() -> str:
     return uuid.uuid4().hex
 
@@ -204,4 +225,30 @@ def emit_rate_limit_exceeded(
         "tool": tool,
         "limit": limit,
         "window_s": window_s,
+    })
+
+
+def emit_databricks_statement(
+    request_id: str | None,
+    statement_id: str | None,
+    warehouse_id: str | None = None,
+    state: str | None = None,
+    tool: str | None = None,
+) -> None:
+    """Correlation event linking an MCP `request_id` to a Databricks
+    `statement_id`. Emitted from `sql_tools._execute_with_cancellation`
+    after the SDK's `execute_statement` returns. Operators tracing a
+    request through the system follow the chain:
+
+      audit `tool.start` → audit `tool.databricks_statement` →
+      Databricks `system.query.history` (filter by `statement_id`) →
+      original SQL text + execution plan
+    """
+    _emit({
+        "event": "tool.databricks_statement",
+        "request_id": request_id,
+        "statement_id": statement_id,
+        "warehouse_id": warehouse_id,
+        "state": state,
+        "tool": tool or current_tool(),
     })

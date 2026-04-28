@@ -36,7 +36,11 @@ from databricks.sdk.service.sql import (
 )
 
 from mcp_server.app import safe_tool
-from mcp_server.audit import current_caller_id
+from mcp_server.audit import (
+    current_caller_id,
+    current_request_id,
+    emit_databricks_statement,
+)
 from mcp_server.databricks.client import (
     WarehouseUnavailable,
     get_workspace,
@@ -151,47 +155,69 @@ async def _execute_with_cancellation(
         query_tags=tags,
     )
     statement_id = resp.statement_id
-
-    # Fast path: statement finished within the 5s inline-wait window.
     state = resp.status.state if resp.status else None
-    if state is None or state not in _INFLIGHT_STATES:
-        return resp
 
-    # Defensive: every SDK response we've seen returns a non-empty
-    # statement_id when state is PENDING/RUNNING. If we somehow get
-    # here without one, we can't drive the poll/cancel cycle — log
-    # and bail back to the caller with whatever we have.
-    if not statement_id:
-        log.warning("execute_statement returned no statement_id with state=%s", state)
-        return resp
-
-    # Phase 2: poll until done or our budget runs out.
-    deadline = asyncio.get_event_loop().time() + max(0, wait_timeout_s - 5)
-    poll_interval_s = 0.5
+    # We emit exactly one `tool.databricks_statement` audit event per
+    # call, in the `finally` below, with the *final* state. That's the
+    # correlation record an operator follows: audit.tool.start →
+    # audit.tool.databricks_statement → system.query.history.
+    final_state_value: str | None = state.value if state else None
 
     try:
-        while resp.status and resp.status.state in _INFLIGHT_STATES:
-            now = asyncio.get_event_loop().time()
-            if now >= deadline:
-                # Our own budget exhausted — cancel server-side and
-                # return the now-CANCELED status so the caller sees a
-                # structured StatementFailed error.
-                await _cancel_quietly(ws, statement_id)
-                return await asyncio.to_thread(
+        # Fast path: statement finished within the 5s inline-wait window.
+        if state is None or state not in _INFLIGHT_STATES:
+            return resp
+
+        # Defensive: every SDK response we've seen returns a non-empty
+        # statement_id when state is PENDING/RUNNING. If we somehow
+        # get here without one, we can't drive the poll/cancel cycle —
+        # log and bail back to the caller with whatever we have.
+        if not statement_id:
+            log.warning(
+                "execute_statement returned no statement_id with state=%s", state,
+            )
+            return resp
+
+        # Phase 2: poll until done or our budget runs out.
+        deadline = asyncio.get_event_loop().time() + max(0, wait_timeout_s - 5)
+        poll_interval_s = 0.5
+
+        try:
+            while resp.status and resp.status.state in _INFLIGHT_STATES:
+                now = asyncio.get_event_loop().time()
+                if now >= deadline:
+                    # Our own budget exhausted — cancel server-side and
+                    # return the now-CANCELED status so the caller sees
+                    # a structured StatementFailed error.
+                    await _cancel_quietly(ws, statement_id)
+                    resp = await asyncio.to_thread(
+                        ws.statement_execution.get_statement, statement_id,
+                    )
+                    return resp
+                await asyncio.sleep(min(poll_interval_s, max(0.05, deadline - now)))
+                resp = await asyncio.to_thread(
                     ws.statement_execution.get_statement, statement_id,
                 )
-            await asyncio.sleep(min(poll_interval_s, max(0.05, deadline - now)))
-            resp = await asyncio.to_thread(
-                ws.statement_execution.get_statement, statement_id,
-            )
-        return resp
-    except BaseException:
-        # CancelledError, KeyboardInterrupt, or anything else. Kill the
-        # workspace-side statement before letting the exception
-        # propagate. _cancel_quietly swallows its own errors so it
-        # never masks the original exception.
-        await _cancel_quietly(ws, statement_id)
-        raise
+            return resp
+        except BaseException:
+            # CancelledError, KeyboardInterrupt, or anything else. Kill
+            # the workspace-side statement before letting the exception
+            # propagate. _cancel_quietly swallows its own errors so it
+            # never masks the original exception.
+            await _cancel_quietly(ws, statement_id)
+            final_state_value = "CANCELED"
+            raise
+    finally:
+        # Capture whatever the most-recent state was (resp may have
+        # been refreshed by the polling loop or the cancel-then-refetch).
+        if resp.status and resp.status.state:
+            final_state_value = resp.status.state.value
+        emit_databricks_statement(
+            request_id=current_request_id(),
+            statement_id=statement_id,
+            warehouse_id=warehouse_id,
+            state=final_state_value,
+        )
 
 
 def _coerce_int(value, name: str, lo: int, hi: int) -> int:

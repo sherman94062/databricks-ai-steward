@@ -132,12 +132,13 @@ def _guard(func: Callable, *, timeout_s: float | None = None) -> Callable:
             request_id = audit.new_request_id()
             caller = audit.current_caller_id()
             audit.emit_tool_start(tool_name, request_id, args, kwargs)
-            # Make the tool name visible to downstream code (e.g.
-            # databricks.client.get_workspace) so it can pick the
-            # right per-tool credential. The contextvar token must be
-            # reset before the wrapper returns, which happens in the
-            # `finally` block below.
+            # Make the tool name + request_id visible to downstream code
+            # (databricks.client.get_workspace for per-tool credentials,
+            # sql_tools._execute_with_cancellation for the
+            # request_id↔statement_id correlation event). The contextvar
+            # tokens are reset in the `finally` block.
             tool_ctx_token = audit.set_current_tool(tool_name)
+            request_ctx_token = audit.set_current_request_id(request_id)
             t0 = asyncio.get_event_loop().time()
 
             # 1. Rate-limit gate. Charged before the tool runs so that
@@ -165,6 +166,7 @@ def _guard(func: Callable, *, timeout_s: float | None = None) -> Callable:
                 _in_flight_tools -= 1
                 telemetry.in_flight_dec()
                 audit.reset_current_tool(tool_ctx_token)
+                audit.reset_current_request_id(request_ctx_token)
                 return resp
 
             with telemetry.tool_span(tool_name, request_id, caller):
@@ -239,6 +241,7 @@ def _guard(func: Callable, *, timeout_s: float | None = None) -> Callable:
                     _in_flight_tools -= 1
                     telemetry.in_flight_dec()
                     audit.reset_current_tool(tool_ctx_token)
+                    audit.reset_current_request_id(request_ctx_token)
 
         return wrapper
 
