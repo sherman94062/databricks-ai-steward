@@ -9,6 +9,97 @@ The model will tighten as the tool surface (and blast radius) grows.
 
 ---
 
+## Data classification
+
+What can flow through the steward, and what must not. Critical for any
+regulated workload — at Zepz specifically, the cross-border-payments
+domain implies KYC, PCI-DSS-adjacent, and GDPR concerns simultaneously.
+
+The steward operates at exactly **one** sensitivity level:
+**whatever the configured Databricks credentials can read**. There is
+no in-process declassification or transformation. If the configured
+service principal has `SELECT` on a payments table, an LLM client with
+the right bearer token can read it — full stop. The defenses below
+*shape* what's likely to flow but do not provide cryptographic data
+isolation.
+
+### Sensitivity tiers (Zepz-style classification)
+
+| Tier | Description | Steward stance |
+|---|---|---|
+| **Public** | No restrictions; safe to log / cache / share | Allowed. The `samples` Unity Catalog catalog is an example. |
+| **Internal** | Workspace-internal metadata (catalog/schema/table names, audit, query history, billing) | Allowed by design. The system-table tools (`list_system_tables`, `recent_audit_events`, `recent_query_history`, `billing_summary`) read this tier. |
+| **Confidential** | Operational analytics — non-PII transactional aggregates, dashboards, KPIs | Allowed if the Databricks credentials grant access. Recommended path: a dedicated SQL warehouse with `SELECT` on aggregate views only, never raw transaction tables. |
+| **Restricted** | PII, KYC documents, payment instruments (PAN/CVV), regulatory reports | **Must not flow.** The mitigation is *workspace-side*: provision the steward's service principal so it has zero grants on these catalogs. The steward cannot enforce this — Databricks does, by rejecting the query before it reaches the steward's governance gate. |
+
+### What the steward intends to handle
+
+- **Schema discovery** — `list_catalogs`, `list_system_tables`, `DESCRIBE`,
+  `INFORMATION_SCHEMA` queries. Internal tier. Useful for analyst
+  context-setting.
+- **Aggregate analytics** — `SELECT count(*) ... GROUP BY ...` style
+  queries against Confidential-tier views. The 1 000-row hard ceiling
+  + 256 KB response cap make bulk extraction impractical.
+- **Operational introspection** — `recent_query_history`,
+  `billing_summary` as read-only dashboards on workspace operations.
+- **Read-only governed SQL** — `execute_sql_safe` for ad-hoc analyst
+  questions against Confidential-or-below data.
+
+### What the steward must not handle
+
+- **Restricted data must never be reachable from any tool's
+  credential.** This is the single most important deployment
+  assertion. Verify by: (a) inspecting the SP's UC grants, (b)
+  attempting a `SELECT` against a known-restricted table from the
+  steward's HTTP transport in a controlled test — the response must
+  be a Databricks `PermissionDenied`, not a successful query.
+- **Bulk export** — even from Confidential tier, response size is
+  capped at 256 KB and rows at 1 000. Patterns like "give me all
+  transactions" are inherently bounded; an attempted bulk-extract
+  attack would surface as a high-rate-limit-exceeded pattern in the
+  audit log (see [`INCIDENT_RESPONSE.md`](INCIDENT_RESPONSE.md)
+  scenario 3).
+- **Cross-region data movement** — the steward is region-blind;
+  whatever region the configured workspace lives in, it serves.
+  GDPR / data-residency concerns are *deployment* concerns, not
+  steward concerns. Document the workspace region in your service
+  metadata and ensure Zepz's data-flow review covers the connection.
+
+### What the steward never sees regardless of tier
+
+- **Customer credentials** of any kind — no passwords, no tokens
+  belonging to Zepz customers. The steward only knows about its own
+  Databricks PAT and bearer token, both held in environment variables
+  injected by the secret store.
+- **PCI-DSS PAN/CVV in cleartext** — even if a workspace stores them
+  (which it shouldn't), the steward shouldn't have a credential that
+  can read them. This is a workspace-grant policy, enforced at
+  Databricks side. (Best practice: tokenize at ingest; the steward
+  reads tokens, never PANs.)
+- **Server-internal state of other tenants** in a multi-tenant
+  deployment. Bearer-token-scoped `caller_id` is *partial* tenant
+  attribution; full multi-tenant isolation needs the per-end-user
+  identity gap closed (see known-limitation #3).
+
+### Verification
+
+The data-classification claim is only as good as the workspace-side
+grants. To verify before a production cutover:
+
+```sql
+-- Run as the steward's service principal:
+SHOW GRANTS ON CATALOG <restricted_catalog>;
+-- Expected: zero rows for the steward's principal
+
+SHOW GRANTS TO `<steward-sp>@your-workspace.com`;
+-- Expected: only the catalogs the steward is supposed to read
+```
+
+`COMPLIANCE.md` "Pre-deployment compliance checklist" includes this
+verification as a gate item.
+
+---
+
 ## Trust boundaries
 
 ```

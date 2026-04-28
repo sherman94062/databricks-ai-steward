@@ -217,5 +217,7 @@ python -m stress.probe_d_blast_radius    # sync-tool blast radius
 | [`COMPATIBILITY.md`](COMPATIBILITY.md) | Client/framework compatibility matrix — what's been tested and what's pending |
 | [`SECURITY.md`](SECURITY.md) | Threat model: what's in-scope, out-of-scope, known limitations, env-var reference |
 | [`RUNBOOK.md`](RUNBOOK.md) | On-call operator's guide — deployment, troubleshooting, rotating credentials, scaling, rollback |
+| [`INCIDENT_RESPONSE.md`](INCIDENT_RESPONSE.md) | Compromise playbooks — credential leak, anomalous query pattern, container escape, upstream CVE |
+| [`COMPLIANCE.md`](COMPLIANCE.md) | SOC 2 / ISO 27001 control mapping + pre-deployment compliance checklist |
 | [`FAILURE_MODES.md`](FAILURE_MODES.md) | Catalog of failure modes covered by the fault-injection harness |
 | [`AGENTS.md`](AGENTS.md) | Original goal statement (pre-Claude Code) |
