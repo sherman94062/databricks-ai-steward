@@ -11,10 +11,19 @@ Databricks. Its contract:
     `databricks.client.resolve_warehouse_id`
   * SDK errors land as the structured `_guard` error response, not
     raised exceptions
+  * **on cancellation, the Databricks statement itself is cancelled** —
+    not just the asyncio task. See `_execute_with_cancellation` for the
+    submit-then-poll pattern that makes this possible (the alternative —
+    blocking on `execute_statement(wait_timeout=N, on_wait_timeout=CANCEL)`
+    — leaves the workspace query running until the SDK's own wait
+    expires, even after the asyncio task has been cancelled, burning
+    warehouse compute on requests nobody is listening to anymore).
 """
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import os
 from typing import Any
 
@@ -35,6 +44,9 @@ from mcp_server.databricks.client import (
     run_in_thread,
 )
 from mcp_server.databricks.sql_safety import classify
+
+log = logging.getLogger(__name__)
+_INFLIGHT_STATES = (StatementState.PENDING, StatementState.RUNNING)
 
 _DEFAULT_ROW_LIMIT = int(os.environ.get("MCP_SQL_ROW_LIMIT", "100"))
 _HARD_ROW_LIMIT = int(os.environ.get("MCP_SQL_HARD_ROW_LIMIT", "1000"))
@@ -69,8 +81,49 @@ def _statement_to_payload(resp, requested_limit: int) -> dict:
     }
 
 
-def _execute_blocking(sql: str, warehouse_id: str, row_limit: int, wait_timeout_s: int):
-    """Synchronous SDK call. Wrap with run_in_thread."""
+async def _cancel_quietly(ws, statement_id: str) -> None:
+    """Best-effort `cancel_execution`. Never raises — the caller is
+    already on a cancellation path and shouldn't have to worry about
+    the cleanup itself failing."""
+    try:
+        await asyncio.to_thread(
+            ws.statement_execution.cancel_execution, statement_id,
+        )
+        log.warning(
+            "cancelled Databricks statement %s on tool cancellation",
+            statement_id,
+        )
+    except Exception:
+        log.exception(
+            "failed to cancel Databricks statement %s — manual cleanup may be needed",
+            statement_id,
+        )
+
+
+async def _execute_with_cancellation(
+    sql: str, warehouse_id: str, row_limit: int, wait_timeout_s: int,
+):
+    """Submit a SQL statement, poll until done, and on any cancellation
+    fire `cancel_execution(statement_id)` so Databricks actually stops
+    the query.
+
+    Why this matters: the previous synchronous-wait pattern
+    (`execute_statement(wait_timeout=25s, on_wait_timeout=CANCEL)`)
+    relied on the SDK's own timer to cancel the workspace query.
+    Anything that cancelled the asyncio task before that timer fired —
+    an external `asyncio.wait_for`, the upstream
+    `notifications/cancelled` once it ships, our own outer
+    `MCP_TOOL_TIMEOUT_S` — would orphan a worker thread that kept
+    polling Databricks until the SDK's window expired (~25 s), still
+    consuming warehouse compute on a request nobody was listening to.
+
+    The two-phase submit-then-poll pattern below makes the asyncio
+    cancellation point reachable: we get the `statement_id` back from
+    the initial submit fast (5s wait, CONTINUE on timeout), then poll
+    `get_statement` with `asyncio.sleep` between calls. Sleeps are
+    cancellation points; on `CancelledError` (or any other exception)
+    we call `cancel_execution(statement_id)` before re-raising.
+    """
     ws = get_workspace()
     # query_tags propagates the MCP caller identity (set per-call by the
     # transport layer's audit hook) into Databricks' own audit trail —
@@ -82,16 +135,63 @@ def _execute_blocking(sql: str, warehouse_id: str, row_limit: int, wait_timeout_
         QueryTag(key="mcp_caller", value=current_caller_id()),
         QueryTag(key="mcp_source", value="databricks-ai-steward"),
     ]
-    return ws.statement_execution.execute_statement(
+
+    # Phase 1: submit. wait_timeout="5s" is the SDK's minimum allowed
+    # value, and on_wait_timeout=CONTINUE means we get a statement_id
+    # back fast even if the query hasn't started yet.
+    resp = await asyncio.to_thread(
+        ws.statement_execution.execute_statement,
         statement=sql,
         warehouse_id=warehouse_id,
         row_limit=row_limit,
-        wait_timeout=f"{wait_timeout_s}s",
-        on_wait_timeout=ExecuteStatementRequestOnWaitTimeout.CANCEL,
+        wait_timeout="5s",
+        on_wait_timeout=ExecuteStatementRequestOnWaitTimeout.CONTINUE,
         disposition=Disposition.INLINE,
         format=Format.JSON_ARRAY,
         query_tags=tags,
     )
+    statement_id = resp.statement_id
+
+    # Fast path: statement finished within the 5s inline-wait window.
+    state = resp.status.state if resp.status else None
+    if state is None or state not in _INFLIGHT_STATES:
+        return resp
+
+    # Defensive: every SDK response we've seen returns a non-empty
+    # statement_id when state is PENDING/RUNNING. If we somehow get
+    # here without one, we can't drive the poll/cancel cycle — log
+    # and bail back to the caller with whatever we have.
+    if not statement_id:
+        log.warning("execute_statement returned no statement_id with state=%s", state)
+        return resp
+
+    # Phase 2: poll until done or our budget runs out.
+    deadline = asyncio.get_event_loop().time() + max(0, wait_timeout_s - 5)
+    poll_interval_s = 0.5
+
+    try:
+        while resp.status and resp.status.state in _INFLIGHT_STATES:
+            now = asyncio.get_event_loop().time()
+            if now >= deadline:
+                # Our own budget exhausted — cancel server-side and
+                # return the now-CANCELED status so the caller sees a
+                # structured StatementFailed error.
+                await _cancel_quietly(ws, statement_id)
+                return await asyncio.to_thread(
+                    ws.statement_execution.get_statement, statement_id,
+                )
+            await asyncio.sleep(min(poll_interval_s, max(0.05, deadline - now)))
+            resp = await asyncio.to_thread(
+                ws.statement_execution.get_statement, statement_id,
+            )
+        return resp
+    except BaseException:
+        # CancelledError, KeyboardInterrupt, or anything else. Kill the
+        # workspace-side statement before letting the exception
+        # propagate. _cancel_quietly swallows its own errors so it
+        # never masks the original exception.
+        await _cancel_quietly(ws, statement_id)
+        raise
 
 
 def _coerce_int(value, name: str, lo: int, hi: int) -> int:
@@ -163,7 +263,7 @@ async def execute_sql_safe(
 
     # 4. Execute. SDK errors fall through to _guard.
     wait_s = max(5, min(50, int(wait_timeout_s) if wait_timeout_s is not None else _WAIT_TIMEOUT_S))
-    resp = await run_in_thread(_execute_blocking, sql, wh_id, requested, wait_s)
+    resp = await _execute_with_cancellation(sql, wh_id, requested, wait_s)
 
     # 5. Map non-success states to a structured error so the caller
     # gets a consistent shape regardless of where the failure happened.

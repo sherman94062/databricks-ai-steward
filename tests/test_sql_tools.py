@@ -6,6 +6,8 @@ Verifies governance + cap + warehouse-resolution + SDK-error handling.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -147,6 +149,97 @@ async def test_caller_id_propagates_to_databricks_query_tags(mock_workspace):
     by_key = {t.key: t.value for t in tags}
     assert by_key.get("mcp_caller") == "agent-alpha"
     assert by_key.get("mcp_source") == "databricks-ai-steward"
+
+
+@pytest.mark.asyncio
+async def test_cancellation_calls_cancel_execution_at_databricks(mock_workspace):
+    """When asyncio cancels execute_sql_safe mid-poll, the workspace-side
+    statement must be cancelled too. Without this, a cancelled tool call
+    leaves the warehouse running the query until the SDK's wait_timeout
+    fires (~25s) — Drew's "10 ghost queries" scenario."""
+    from databricks.sdk.service.sql import StatementState
+
+    pending = SimpleNamespace(
+        statement_id="stmt-pending-001",
+        warehouse_id="wh-fake",
+        status=SimpleNamespace(state=StatementState.PENDING, error=None),
+        manifest=None,
+        result=None,
+    )
+    running = SimpleNamespace(
+        statement_id="stmt-pending-001",
+        warehouse_id="wh-fake",
+        status=SimpleNamespace(state=StatementState.RUNNING, error=None),
+        manifest=None,
+        result=None,
+    )
+
+    # First call (execute_statement) returns PENDING (still in flight).
+    mock_workspace.statement_execution.execute_statement.return_value = pending
+    # Subsequent get_statement calls all return RUNNING — the loop
+    # never completes naturally, so cancellation is the only exit.
+    mock_workspace.statement_execution.get_statement.return_value = running
+
+    task = asyncio.create_task(
+        sql_tools.execute_sql_safe("SELECT * FROM samples.nyctaxi.trips")
+    )
+    # Yield enough times for the poll loop to enter at least one
+    # asyncio.sleep — that's where cancellation will land.
+    await asyncio.sleep(0.6)
+    task.cancel()
+
+    # The cancellation should propagate as ToolTimeout via _guard
+    # (CancelledError is caught and reported), OR the task itself
+    # may report it as cancelled depending on timing. Either way,
+    # cancel_execution must have been called with our statement_id.
+    with contextlib.suppress(asyncio.CancelledError, Exception):
+        await task
+
+    mock_workspace.statement_execution.cancel_execution.assert_called_with(
+        "stmt-pending-001"
+    )
+
+
+@pytest.mark.asyncio
+async def test_deadline_expiry_cancels_at_databricks(mock_workspace, monkeypatch):
+    """When the wait_timeout_s budget expires while the statement is
+    still RUNNING, we cancel server-side and return the post-cancel
+    state. No ghost query."""
+    from databricks.sdk.service.sql import StatementState
+
+    pending = SimpleNamespace(
+        statement_id="stmt-deadline-001",
+        warehouse_id="wh-fake",
+        status=SimpleNamespace(state=StatementState.PENDING, error=None),
+        manifest=None,
+        result=None,
+    )
+    canceled = SimpleNamespace(
+        statement_id="stmt-deadline-001",
+        warehouse_id="wh-fake",
+        status=SimpleNamespace(state=StatementState.CANCELED, error=None),
+        manifest=None,
+        result=None,
+    )
+    mock_workspace.statement_execution.execute_statement.return_value = pending
+    # Always RUNNING during the loop, then return CANCELED after we
+    # cancel server-side and re-fetch.
+    states = iter([pending, pending, canceled])
+    mock_workspace.statement_execution.get_statement.side_effect = (
+        lambda *a, **kw: next(states, canceled)
+    )
+
+    # wait_timeout_s=6 → after the 5s inline-wait, our poll budget is 1s.
+    # The poll loop should hit the deadline quickly.
+    result = await sql_tools.execute_sql_safe(
+        "SELECT * FROM samples.nyctaxi.trips", wait_timeout_s=6,
+    )
+    # Caller sees structured error reporting CANCELED.
+    assert result["error"]["type"] == "StatementFailed"
+    assert result["error"]["state"] == "CANCELED"
+    mock_workspace.statement_execution.cancel_execution.assert_called_with(
+        "stmt-deadline-001"
+    )
 
 
 @pytest.mark.asyncio

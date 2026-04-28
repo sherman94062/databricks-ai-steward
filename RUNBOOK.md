@@ -197,10 +197,25 @@ audit log for the offending caller's recent records.
 
 ### Symptom: Tool call returns `{"error": {"type": "ToolTimeout"}}`
 The outer guard timeout fired. Default 30s; SQL tools bump to 60s.
-The actual statement is cancelled server-side by Databricks because
-`on_wait_timeout=CANCEL`. Common causes: cold-starting a warehouse,
+The Databricks statement is cancelled server-side via
+`cancel_execution(statement_id)` — the cancellation is propagated, not
+just the asyncio task. Verify by polling `get_statement(statement_id)`
+or `system.query.history`; you should see `execution_status='CANCELED'`
+within a couple of seconds. Common causes: cold-starting a warehouse,
 querying a high-volume system table on a small warehouse (see
 SECURITY.md known-limitation #5), or genuinely slow SQL.
+
+### Symptom: ghost queries — workspace shows running statements with no client waiting
+This was the failure mode the **submit-then-poll** refactor closed.
+If you see it on a current build:
+1. Check the SDK version — the fix lives in `mcp_server/tools/sql_tools.py`'s
+   `_execute_with_cancellation`. A rollback to a build that used
+   `_execute_blocking` (synchronous wait) would re-introduce this.
+2. Run `python -m stress.probe_sql_cancellation` — if it FAILs the
+   "state in {CANCELED, CLOSED}" check, the fix has regressed.
+3. As a stop-gap: lower `MCP_SQL_WAIT_TIMEOUT_S` (default 25) and
+   `MCP_TOOL_TIMEOUT_S` (default 30) to bound the leak window, then
+   patch the code path.
 
 ### Symptom: `recent_audit_events` always returns `StatementFailed: CANCELED` on a 2X-Small warehouse
 Documented limitation. Move to a larger warehouse, or call
