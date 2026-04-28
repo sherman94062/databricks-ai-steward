@@ -8,3 +8,6 @@ __pycache__/
 
 # editor / agent harness configs (machine-specific paths)
 .cursor/mcp.json
+
+# CI / security artifacts (generated, not committed)
+sbom.json

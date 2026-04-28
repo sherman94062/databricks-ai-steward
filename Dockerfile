@@ -21,15 +21,19 @@ WORKDIR /build
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
-# Copy the project sources we need to install. Order maximises layer
-# cache hits: deps change rarely, source changes often.
-COPY pyproject.toml README.md ./
+# Copy lockfile + project sources. Order maximises layer cache hits:
+# deps change rarely (lockfile only changes on `pip-compile`), source
+# changes often.
+COPY requirements.lock pyproject.toml README.md ./
 COPY mcp_server ./mcp_server
 
-# Install runtime deps + the project (and the http extras so HTTP
-# transports work out of the box).
+# Install pinned runtime deps from the lockfile (reproducible builds),
+# then install the project itself with no-deps so we don't pull
+# anything outside the lock. Upgrading pip first closes
+# CVE-2026-3219.
 RUN pip install --upgrade pip && \
-    pip install '.[http]'
+    pip install -r requirements.lock && \
+    pip install --no-deps .
 
 
 # ---- final -----------------------------------------------------------
