@@ -66,6 +66,58 @@ def _parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+def make_bearer_auth_middleware(
+    *,
+    expected_authorization: str,
+    bearer_caller: str,
+    trust_end_user_header: bool,
+    end_user_header_name: str,
+    unauthenticated_paths: frozenset[str],
+):
+    """Build the bearer-auth Starlette BaseHTTPMiddleware class.
+
+    Extracted from `_build_starlette_app` so tests can apply it to a
+    plain Starlette app instead of FastMCP's streamable-http app
+    (which uses a singleton session manager that can't be re-entered
+    across tests).
+    """
+    from starlette.middleware.base import BaseHTTPMiddleware
+    from starlette.responses import JSONResponse
+
+    from mcp_server import audit
+
+    class _BearerAuth(BaseHTTPMiddleware):
+        async def dispatch(self, request, call_next):
+            if request.url.path in unauthenticated_paths:
+                return await call_next(request)
+            got = request.headers.get("authorization", "")
+            if not secrets.compare_digest(got, expected_authorization):
+                return JSONResponse(
+                    {"error": "unauthorized"},
+                    status_code=401,
+                    headers={"WWW-Authenticate": 'Bearer realm="mcp"'},
+                )
+            # Authenticated — set caller identity for the audit /
+            # rate-limit hooks downstream. contextvars survives
+            # across the await chain that handles this request.
+            # Caller resolution priority:
+            #   1. <end-user> from the trusted header, if enabled +
+            #      present + non-empty.
+            #   2. bearer_caller (from MCP_BEARER_TOKEN_NAME).
+            caller = bearer_caller
+            if trust_end_user_header:
+                end_user = request.headers.get(end_user_header_name, "").strip()
+                if end_user:
+                    caller = end_user
+            token_obj = audit.set_caller_id(caller)
+            try:
+                return await call_next(request)
+            finally:
+                audit.reset_caller_id(token_obj)
+
+    return _BearerAuth
+
+
 def _build_starlette_app(transport: str):
     """Build the Starlette app for the given HTTP transport, wrapping
     with k8s probe routes (always) and bearer-auth middleware (if
@@ -77,12 +129,27 @@ def _build_starlette_app(transport: str):
 
     token = os.environ.get("MCP_BEARER_TOKEN", "").strip()
     bearer_caller = os.environ.get("MCP_BEARER_TOKEN_NAME", "").strip() or "bearer-authenticated"
+    # Per-end-user identity propagation. When the steward sits behind
+    # a trusted upstream proxy (oauth2-proxy / authelia / istio /
+    # API-gateway with verified user headers), the proxy sets a header
+    # naming the authenticated end-user. This server picks it up and
+    # uses it as caller_id IFF the operator explicitly trusts the
+    # header — otherwise an attacker could just forge it.
+    #
+    # Default is OFF (fail-secure). To enable, the operator must set
+    # both:
+    #   MCP_TRUST_END_USER_HEADER=1
+    #   MCP_END_USER_HEADER=<header-name>   (default X-End-User)
+    # AND must guarantee that the upstream proxy strips any
+    # client-supplied value of that header before setting its own —
+    # otherwise the trust is undermined.
+    trust_end_user_header = os.environ.get("MCP_TRUST_END_USER_HEADER", "").strip().lower() in ("1", "true", "yes")
+    end_user_header_name = os.environ.get("MCP_END_USER_HEADER", "X-End-User").strip()
 
-    from starlette.middleware.base import BaseHTTPMiddleware
-    from starlette.responses import JSONResponse, PlainTextResponse
+    from starlette.responses import PlainTextResponse
     from starlette.routing import Route
 
-    from mcp_server import audit, lifecycle
+    from mcp_server import lifecycle
 
     # ---- k8s probe routes ------------------------------------------------
     # /healthz: process is alive. Used as the liveness probe — k8s restarts
@@ -121,35 +188,27 @@ def _build_starlette_app(transport: str):
 
     # ---- bearer auth -----------------------------------------------------
     if token:
-        expected = f"Bearer {token}"
         # Paths the auth middleware lets through unauthenticated. Probes
         # and metrics belong to the orchestrator (k8s, scrapers), not
         # the API surface, so they're always accessible.
-        unauthenticated_paths = {"/healthz", "/readyz", "/metrics"}
+        unauthenticated_paths = frozenset({"/healthz", "/readyz", "/metrics"})
 
-        class _BearerAuth(BaseHTTPMiddleware):
-            async def dispatch(self, request, call_next):
-                if request.url.path in unauthenticated_paths:
-                    return await call_next(request)
-                got = request.headers.get("authorization", "")
-                if not secrets.compare_digest(got, expected):
-                    return JSONResponse(
-                        {"error": "unauthorized"},
-                        status_code=401,
-                        headers={"WWW-Authenticate": 'Bearer realm="mcp"'},
-                    )
-                # Authenticated — set caller identity for the audit/
-                # rate-limit hooks downstream. contextvars survives across
-                # the await chain that handles this request.
-                token_obj = audit.set_caller_id(bearer_caller)
-                try:
-                    return await call_next(request)
-                finally:
-                    audit.reset_caller_id(token_obj)
-
-        app.add_middleware(_BearerAuth)
+        middleware_cls = make_bearer_auth_middleware(
+            expected_authorization=f"Bearer {token}",
+            bearer_caller=bearer_caller,
+            trust_end_user_header=trust_end_user_header,
+            end_user_header_name=end_user_header_name,
+            unauthenticated_paths=unauthenticated_paths,
+        )
+        app.add_middleware(middleware_cls)
         log.warning("bearer auth enabled (token len=%d, caller_id=%r)",
                     len(token), bearer_caller)
+        if trust_end_user_header:
+            log.warning(
+                "trusting %r header for per-end-user caller_id "
+                "(MUST be set by a verified upstream proxy)",
+                end_user_header_name,
+            )
     else:
         log.warning("bearer auth NOT enabled (set MCP_BEARER_TOKEN to enable)")
 

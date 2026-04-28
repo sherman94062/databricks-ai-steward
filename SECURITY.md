@@ -62,7 +62,7 @@ audit, this section is the most important one in the document.
 | **Privilege escalation via tool chaining** | An agent chains tools to reach data no single tool would allow (e.g. `list_system_tables` → `recent_audit_events` to enumerate which catalogs *exist*, then `execute_sql_safe` to read them). | Per-(tool, caller) rate limit caps the chain rate. Per-tool credential abstraction (`MCP_TOOL_TOKEN_<TOOL>`) enables giving each tool its own narrow Databricks SP, so chaining cannot exceed the union of the SP grants. | `test_audit_and_rate_limit` (rate limit + isolation) + `test_tool_credentials` |
 | **Data exfiltration via large reads** | Agent issues `SELECT * FROM big_table` and exfiltrates rows via the response. | Server-side row cap (`MCP_SQL_HARD_ROW_LIMIT`, default 1 000) enforced via SDK `row_limit` parameter (cannot be bypassed by adding `LIMIT` in the SQL). Response size cap (`MCP_MAX_RESPONSE_BYTES`, default 256 KB). | `test_sql_tools::test_row_limit_capped_at_hard_ceiling` |
 | **Data exfiltration via timing / side channel** | Agent encodes data into query timing or error-message variation. | `_scrub` redacts known secrets from error messages; rate limit bounds the iteration rate. Not fully mitigated — out-of-scope as a per-call concern, in-scope as a rate-limited concern. **Documented residual risk.** | n/a |
-| **Authentication confusion** | Mismatch between bearer-token-name, Databricks identity, and audit log creates false attribution. | `caller_id` contextvar set by bearer middleware; identical value flows into audit log + Databricks `query_tags`. Single source of truth. *Limitation: per-end-user identity gap if multiple humans share a bearer token — see known-limitation #3.* | `test_audit_and_rate_limit::test_caller_id_carries_into_audit_record` + `test_sql_tools::test_caller_id_propagates_to_databricks_query_tags` |
+| **Authentication confusion** | Mismatch between bearer-token-name, Databricks identity, and audit log creates false attribution. | `caller_id` contextvar set by bearer middleware; identical value flows into audit log + Databricks `query_tags`. Single source of truth. Per-end-user identity available via `MCP_TRUST_END_USER_HEADER` when behind a verified upstream proxy — see known-limitation #3. | `test_audit_and_rate_limit::test_caller_id_carries_into_audit_record`, `test_audit_and_rate_limit::test_end_user_header_*`, `test_sql_tools::test_caller_id_propagates_to_databricks_query_tags` |
 | **Session hijacking** | Bearer token is captured and replayed. | TLS termination expected at the deployment layer; timing-safe `secrets.compare_digest`; rotation procedure documented in RUNBOOK. | manual review (TLS + rotation are operator-side) |
 | **Resource exhaustion / DoS** | Agent spam-calls tools to exhaust workspace API quota or our process. | Per-tool rate limit; tool timeout; SDK retries on 429; surplus surfaces as structured errors not crashes. Soak-tested at 1 000 calls / 5 min with no fd or RSS growth. | `probe_databricks_soak` + `probe_d_blast_radius` |
 | **Cancellation orphans / ghost queries** | Agent cancels mid-flight; workspace query keeps running until SDK timer expires. | `_execute_with_cancellation` calls `cancel_execution(statement_id)` on every cancellation path. Verified live: cancel propagates in <1 s, statement transitions to `CANCELED` at workspace. | `probe_sql_cancellation` (live) + `test_sql_tools::test_cancellation_calls_cancel_execution_at_databricks` |
@@ -185,8 +185,9 @@ isolation.
   reads tokens, never PANs.)
 - **Server-internal state of other tenants** in a multi-tenant
   deployment. Bearer-token-scoped `caller_id` is *partial* tenant
-  attribution; full multi-tenant isolation needs the per-end-user
-  identity gap closed (see known-limitation #3).
+  attribution; per-human attribution requires deploying behind a
+  verified upstream proxy with `MCP_TRUST_END_USER_HEADER=1` (see
+  known-limitation #3).
 
 ### Verification
 
@@ -293,22 +294,22 @@ per-tool sub-credentialing yet.
    token rotation, no per-caller scope. Pair with a reverse proxy for
    anything beyond loopback dev use.
 
-   **Per-end-user identity gap.** When `MCP_BEARER_TOKEN` is set, every
+   **Per-end-user identity (mitigated, opt-in).** By default an
    authenticated request gets `caller_id = MCP_BEARER_TOKEN_NAME` —
-   *bearer-token-level* attribution, not per-end-user. If multiple
-   humans share a single bearer token (typical for a shared-deployment
-   model where the platform owns the steward and individual analysts
-   hit it through an agent), the audit log + Databricks `query_tags`
-   cannot tell them apart. Closing this gap requires either:
-   - an OAuth-per-user flow at the HTTP layer, or
-   - a trust relationship with an upstream proxy that propagates a
-     header like `X-End-User: <id>` which the bearer middleware
-     reads into the `caller_id` contextvar in addition to the
-     bearer-token name.
+   *bearer-token-level* attribution. To get per-human attribution in the
+   audit log and Databricks `query_tags`, deploy behind a verified
+   upstream proxy (oauth2-proxy / authelia / istio / API gateway) that
+   sets a header naming the authenticated end-user, then enable:
+   - `MCP_TRUST_END_USER_HEADER=1` — opt in to reading the header
+   - `MCP_END_USER_HEADER=<name>` — defaults to `X-End-User`; common
+     alternatives are `X-Forwarded-User` (oauth2-proxy default),
+     `X-Auth-Request-Email`, or `X-Forwarded-Email`
 
-   Both approaches are middleware additions (no SDK or transport
-   changes) — picking which depends on how Drew's identity story
-   shakes out.
+   When set + present + non-empty, the middleware uses the header value
+   as `caller_id`; otherwise it falls back to `MCP_BEARER_TOKEN_NAME`
+   (fail-secure — never anonymous). The proxy MUST strip any
+   client-supplied value of that header before setting its own,
+   otherwise an attacker can forge it. Default is OFF.
 4. **Cancellation propagation depends on local fix.** Until
    [python-sdk#2507](https://github.com/modelcontextprotocol/python-sdk/issues/2507)
    ships, the server-side per-tool timeout is the only thing bounding
@@ -394,6 +395,8 @@ per-tool sub-credentialing yet.
 | `MCP_AUDIT_DISABLE_STDERR` | If `1`, suppress audit-log emission to stderr (file write still happens). Useful when a sidecar log shipper is reading the JSONL file. | unset |
 | `MCP_CALLER_ID` | Default caller identity for this process. Overridden per-request by transport-layer hooks (e.g. bearer-auth middleware). | `unknown` |
 | `MCP_BEARER_TOKEN_NAME` | Caller identity used in audit + Databricks `query_tags` when a request authenticates with `MCP_BEARER_TOKEN`. | `bearer-authenticated` |
+| `MCP_TRUST_END_USER_HEADER` | If `1`, trust an upstream-proxy-set header naming the authenticated end-user as the per-request `caller_id` (overrides `MCP_BEARER_TOKEN_NAME`). The proxy MUST strip any client-supplied value of that header. | unset |
+| `MCP_END_USER_HEADER` | Header name to read end-user identity from when `MCP_TRUST_END_USER_HEADER=1`. Common values: `X-Forwarded-User` (oauth2-proxy), `X-Auth-Request-Email`. | `X-End-User` |
 | `MCP_RATE_LIMIT` | Per-tool overrides, e.g. `execute_sql_safe=10/60,*=200/60`. Each entry is `tool=count/window_seconds`; `*` matches any tool not explicitly listed. | (defaults applied) |
 
 ## k8s integration

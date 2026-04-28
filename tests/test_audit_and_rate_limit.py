@@ -193,6 +193,130 @@ def test_rate_limit_parse_overrides_skips_garbage():
 # FastMCP streamable-http session manager is a singleton that can't be
 # rebuilt mid-process, so we share one app across all assertions.
 
+def _audit_caller_capture_app(monkeypatch, **env):
+    """Build a plain Starlette app + a stub route that records the
+    caller_id observed during a request, with `make_bearer_auth_middleware`
+    applied directly. Avoids `_build_starlette_app` because FastMCP's
+    streamable-http session manager is a singleton that can't be rebuilt
+    across tests in the same process."""
+    monkeypatch.setenv("MCP_BEARER_TOKEN", env.pop("MCP_BEARER_TOKEN", "test-bearer-1234567890"))
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+
+    from starlette.applications import Starlette
+    from starlette.responses import JSONResponse
+    from starlette.routing import Route
+
+    from mcp_server import audit
+    from mcp_server.server import make_bearer_auth_middleware
+
+    bearer_caller = env.get("MCP_BEARER_TOKEN_NAME", "bearer-authenticated")
+    trust_end_user_header = env.get("MCP_TRUST_END_USER_HEADER", "").strip().lower() in ("1", "true", "yes")
+    end_user_header_name = env.get("MCP_END_USER_HEADER", "X-End-User").strip()
+
+    captured: dict[str, object] = {"caller_id": None}
+
+    async def _whoami(_request):
+        # Runs inside the bearer middleware → reads what caller_id is
+        captured["caller_id"] = audit.current_caller_id()
+        return JSONResponse({"caller_id": captured["caller_id"]})
+
+    app = Starlette(routes=[Route("/_test_whoami", _whoami, methods=["GET"])])
+
+    middleware_cls = make_bearer_auth_middleware(
+        expected_authorization="Bearer test-bearer-1234567890",
+        bearer_caller=bearer_caller,
+        trust_end_user_header=trust_end_user_header,
+        end_user_header_name=end_user_header_name,
+        unauthenticated_paths=frozenset({"/healthz", "/readyz", "/metrics"}),
+    )
+    app.add_middleware(middleware_cls)
+    return app, captured
+
+
+def test_end_user_header_ignored_when_trust_not_enabled(monkeypatch):
+    """Default posture: even if a client sends X-End-User, the steward
+    falls back to MCP_BEARER_TOKEN_NAME. Forging the header is futile
+    until the operator opts in."""
+    from starlette.testclient import TestClient
+
+    app, captured = _audit_caller_capture_app(
+        monkeypatch,
+        MCP_BEARER_TOKEN_NAME="team-data",
+        # MCP_TRUST_END_USER_HEADER deliberately unset
+    )
+    with TestClient(app) as c:
+        r = c.get(
+            "/_test_whoami",
+            headers={"Authorization": "Bearer test-bearer-1234567890",
+                     "X-End-User": "evil@attacker.invalid"},
+        )
+    assert r.status_code == 200
+    assert captured["caller_id"] == "team-data"
+
+
+def test_end_user_header_used_when_trust_enabled(monkeypatch):
+    """With MCP_TRUST_END_USER_HEADER=1, the steward uses the header
+    value as caller_id — for audit + Databricks query_tags."""
+    from starlette.testclient import TestClient
+
+    app, captured = _audit_caller_capture_app(
+        monkeypatch,
+        MCP_BEARER_TOKEN_NAME="team-data",
+        MCP_TRUST_END_USER_HEADER="1",
+    )
+    with TestClient(app) as c:
+        r = c.get(
+            "/_test_whoami",
+            headers={"Authorization": "Bearer test-bearer-1234567890",
+                     "X-End-User": "alice@example.com"},
+        )
+    assert r.status_code == 200
+    assert captured["caller_id"] == "alice@example.com"
+
+
+def test_end_user_header_falls_back_when_absent(monkeypatch):
+    """Trust enabled but the proxy didn't set the header (e.g. the
+    request is a service-to-service call that didn't go through the
+    user-auth path). Falls back to bearer_caller — does not fail-open
+    to "anonymous"."""
+    from starlette.testclient import TestClient
+
+    app, captured = _audit_caller_capture_app(
+        monkeypatch,
+        MCP_BEARER_TOKEN_NAME="team-data",
+        MCP_TRUST_END_USER_HEADER="1",
+    )
+    with TestClient(app) as c:
+        r = c.get(
+            "/_test_whoami",
+            headers={"Authorization": "Bearer test-bearer-1234567890"},
+        )
+    assert r.status_code == 200
+    assert captured["caller_id"] == "team-data"
+
+
+def test_end_user_header_custom_name(monkeypatch):
+    """Operators with proxies that emit X-Forwarded-User (oauth2-proxy
+    default) can point us at that header instead."""
+    from starlette.testclient import TestClient
+
+    app, captured = _audit_caller_capture_app(
+        monkeypatch,
+        MCP_BEARER_TOKEN_NAME="team-data",
+        MCP_TRUST_END_USER_HEADER="1",
+        MCP_END_USER_HEADER="X-Forwarded-User",
+    )
+    with TestClient(app) as c:
+        r = c.get(
+            "/_test_whoami",
+            headers={"Authorization": "Bearer test-bearer-1234567890",
+                     "X-Forwarded-User": "bob@example.com"},
+        )
+    assert r.status_code == 200
+    assert captured["caller_id"] == "bob@example.com"
+
+
 def test_k8s_probes_bypass_bearer_auth_and_track_drain_state(monkeypatch):
     monkeypatch.setenv("MCP_BEARER_TOKEN", "test-token-1234567890")
 

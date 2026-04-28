@@ -104,6 +104,68 @@ The audit log is also **per-process**. Aggregate via a sidecar log
 shipper (Vector, Filebeat, Fluent Bit) reading the JSONL file or
 stderr; records are already in a shape friendly to those tools.
 
+### Per-end-user attribution (behind a verified proxy)
+
+By default `caller_id` is set from `MCP_BEARER_TOKEN_NAME` —
+bearer-token-level. If you want per-human attribution in the audit log
+and Databricks `query_tags`, deploy the steward behind a proxy that
+authenticates the user and forwards an identity header.
+
+**Trust contract.** The proxy MUST strip any client-supplied value of
+the chosen header before setting its own. If a client can forge the
+header, the trust is undermined. Default is OFF (fail-secure).
+
+**Steward side:**
+
+```bash
+MCP_BEARER_TOKEN=...                     # still required for transport auth
+MCP_BEARER_TOKEN_NAME=team-data          # fallback when the header is absent
+MCP_TRUST_END_USER_HEADER=1              # opt in
+MCP_END_USER_HEADER=X-Forwarded-User     # match what the proxy emits
+```
+
+When the header is absent (e.g. service-to-service call that didn't
+go through user-auth), the steward falls back to
+`MCP_BEARER_TOKEN_NAME` — never anonymous.
+
+**Common proxy choices:**
+
+| Proxy | Header it sets | `MCP_END_USER_HEADER` value |
+|---|---|---|
+| oauth2-proxy | `X-Forwarded-User` (also `X-Forwarded-Email`) | `X-Forwarded-User` |
+| authelia | `Remote-User` (also `Remote-Email`) | `Remote-User` |
+| istio + RequestAuthentication | jwt claim → `x-user-claim` (custom) | `X-User-Claim` |
+| API gateway w/ verified JWT | whatever the gateway sets | match it |
+
+**oauth2-proxy nginx ingress example (k8s):**
+
+```yaml
+nginx.ingress.kubernetes.io/auth-url: "http://oauth2-proxy.auth.svc.cluster.local/oauth2/auth"
+nginx.ingress.kubernetes.io/auth-signin: "https://login.example.com/oauth2/start?rd=$escaped_request_uri"
+nginx.ingress.kubernetes.io/auth-response-headers: "X-Auth-Request-Email,X-Auth-Request-User"
+nginx.ingress.kubernetes.io/configuration-snippet: |
+  proxy_set_header X-Forwarded-User $upstream_http_x_auth_request_user;
+  # CRITICAL: clear any client-supplied X-Forwarded-User before the proxy sets it
+  proxy_set_header X-Forwarded-User "";
+```
+
+**Verify it's working:**
+
+```bash
+curl -H "Authorization: Bearer $MCP_BEARER_TOKEN" \
+     -H "X-Forwarded-User: alice@example.com" \
+     https://steward.internal/mcp
+# Then in the audit log:
+jq 'select(.tool=="execute_sql_safe") | .caller_id' $MCP_AUDIT_LOG_PATH | tail
+# → "alice@example.com"
+```
+
+Per-end-user `caller_id` flows through both the audit log and
+Databricks `query_tags`, so an auditor can pivot from a `tool.end`
+record to `system.query.history` and see *which human* triggered
+*which statement*, even though every statement still runs under one
+service-principal PAT.
+
 ---
 
 ## Configuration reference
@@ -119,6 +181,8 @@ stderr; records are already in a shape friendly to those tools.
 | `MCP_ALLOW_EXTERNAL` | Permit non-loopback bind | unset (refuses) |
 | `MCP_BEARER_TOKEN` | Required `Authorization: Bearer …` value on HTTP transports | unset |
 | `MCP_BEARER_TOKEN_NAME` | Caller identity attached to audit + Databricks `query_tags` for authenticated requests | `bearer-authenticated` |
+| `MCP_TRUST_END_USER_HEADER` | If `1`, read per-end-user identity from a trusted upstream-proxy header (overrides `MCP_BEARER_TOKEN_NAME`). See "Per-end-user attribution" below. | unset |
+| `MCP_END_USER_HEADER` | Header name to read end-user identity from when `MCP_TRUST_END_USER_HEADER=1` | `X-End-User` |
 | `MCP_RATE_LIMIT` | Per-tool quota overrides, e.g. `execute_sql_safe=10/60,*=200/60` | defaults |
 | `MCP_TOOL_TIMEOUT_S` | Outer per-tool timeout via `_guard` | `30` |
 | `MCP_SQL_WAIT_TIMEOUT_S` | Databricks Statement-Execution `wait_timeout` | `25` |
