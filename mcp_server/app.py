@@ -130,6 +130,12 @@ def _guard(func: Callable, *, timeout_s: float | None = None) -> Callable:
             tool_name = func.__name__
             request_id = audit.new_request_id()
             audit.emit_tool_start(tool_name, request_id, args, kwargs)
+            # Make the tool name visible to downstream code (e.g.
+            # databricks.client.get_workspace) so it can pick the
+            # right per-tool credential. The contextvar token must be
+            # reset before the wrapper returns, which happens in the
+            # `finally` block below.
+            tool_ctx_token = audit.set_current_tool(tool_name)
             t0 = asyncio.get_event_loop().time()
 
             # 1. Rate-limit gate. Charged before the tool runs so that
@@ -154,6 +160,7 @@ def _guard(func: Callable, *, timeout_s: float | None = None) -> Callable:
                     error_type="RateLimitExceeded",
                 )
                 _in_flight_tools -= 1
+                audit.reset_current_tool(tool_ctx_token)
                 return resp
 
             try:
@@ -215,6 +222,7 @@ def _guard(func: Callable, *, timeout_s: float | None = None) -> Callable:
                 return capped
             finally:
                 _in_flight_tools -= 1
+                audit.reset_current_tool(tool_ctx_token)
 
         return wrapper
 

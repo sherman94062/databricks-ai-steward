@@ -62,6 +62,26 @@ def current_caller_id() -> str:
     return _caller_id.get() or _process_default_caller()
 
 
+# The currently-executing tool, set by `_guard` on entry. Used by
+# `databricks.client.get_workspace()` to pick a per-tool credential
+# when one is configured (least-privilege downstream of the steward).
+_current_tool: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "mcp_current_tool", default=None,
+)
+
+
+def set_current_tool(name: str) -> contextvars.Token:
+    return _current_tool.set(name)
+
+
+def reset_current_tool(token: contextvars.Token) -> None:
+    _current_tool.reset(token)
+
+
+def current_tool() -> str | None:
+    return _current_tool.get()
+
+
 def new_request_id() -> str:
     return uuid.uuid4().hex
 

@@ -1,13 +1,26 @@
 """Databricks workspace client wrapper.
 
-Owns the singleton `WorkspaceClient` and provides a single helper for
-calling its synchronous methods from async tools without blocking the
-asyncio event loop.
+Owns the singleton `WorkspaceClient` (one per token) and provides a
+single helper for calling its synchronous methods from async tools
+without blocking the asyncio event loop.
 
-Auth is read from `DATABRICKS_HOST` and `DATABRICKS_TOKEN` (loaded by
-`mcp_server.server` via python-dotenv from `.env`). The SDK also
-honors `~/.databrickscfg` profiles; if `DATABRICKS_HOST`/`_TOKEN` are
-absent the SDK will fall back to a profile.
+Auth precedence — read at call time, so token rotation in `.env` /
+secrets-injector takes effect on the next request:
+
+  1. **Per-tool token** — if the currently-executing tool is named
+     `foo` and `MCP_TOOL_TOKEN_FOO` is set, that token is used. The
+     production-grade pattern for least-privilege: provision one
+     Databricks service principal per tool with only the grants that
+     tool needs (e.g. `execute_sql_safe` gets `USE_CATALOG` on
+     production but no `MODIFY`; `recent_audit_events` gets `SELECT`
+     on `system.access.audit` only). The steward then never holds a
+     blast-radius credential.
+  2. **Default token** — `DATABRICKS_TOKEN` env var.
+  3. **SDK profile** — `~/.databrickscfg` if neither env var is set.
+
+Per-tool clients are cached by tool name + token-hash, so a token
+rotation rebuilds the client on next request without keeping stale
+HTTPS pools around.
 """
 
 from __future__ import annotations
@@ -30,17 +43,66 @@ class WarehouseUnavailable(RuntimeError):
     """
 
 _client: WorkspaceClient | None = None
+# Distinguishes "tests injected a mock via set_workspace_for_tests"
+# from "we lazily constructed the default singleton". When this flag
+# is True, _client is the test override and bypasses per-tool tokens.
+_test_override_active: bool = False
+# Cache of tool-scoped clients, keyed by `f"{tool_name}:{hash(token)}"`
+# so rotating the token rebuilds the client on next call.
+_tool_clients: dict[str, WorkspaceClient] = {}
+
+
+def _tool_token_for(tool: str | None) -> str:
+    """Return the configured per-tool token, or "" if none is set."""
+    if not tool:
+        return ""
+    var = f"MCP_TOOL_TOKEN_{tool.upper()}"
+    return os.environ.get(var, "").strip()
+
+
+def _build_tool_client(token: str) -> WorkspaceClient:
+    host = os.environ.get("DATABRICKS_HOST", "").strip()
+    if not host:
+        # Fall back to SDK auto-detection — covers the .databrickscfg
+        # profile case. SDK will raise loudly if it can't find a host.
+        return WorkspaceClient(token=token)
+    return WorkspaceClient(host=host, token=token)
 
 
 def get_workspace() -> WorkspaceClient:
-    """Return the lazily-initialized singleton WorkspaceClient.
+    """Return a WorkspaceClient appropriate for the currently-executing tool.
 
-    The first call constructs the client (which reads credentials from
-    env vars or `~/.databrickscfg`). Subsequent calls reuse it. Tests
-    inject a mock by setting the module-level `_client` attribute via
-    `set_workspace_for_tests(mock)`.
+    If `MCP_TOOL_TOKEN_<TOOL>` is set for the current tool (set by
+    `_guard` on entry via `audit.set_current_tool`), build (or reuse)
+    a tool-scoped client with that token. Otherwise return the lazily-
+    constructed default singleton.
+
+    Tests inject a mock via `set_workspace_for_tests(mock)` — the mock
+    overrides everything (per-tool tokens are ignored in test mode so
+    fixtures stay simple).
     """
     global _client
+
+    # Test override takes precedence — keeps unit tests deterministic.
+    if _test_override_active:
+        return _client  # type: ignore[return-value]
+
+    # Per-tool credential path. Checked before the default singleton so
+    # that even if the default has already been constructed, a tool
+    # with its own token gets the more-restrictive client.
+    from mcp_server import audit  # local import to avoid circular at module load
+    tool = audit.current_tool()
+    tool_token = _tool_token_for(tool)
+    if tool and tool_token:
+        cache_key = f"{tool}:{hash(tool_token)}"
+        cached = _tool_clients.get(cache_key)
+        if cached is not None:
+            return cached
+        client = _build_tool_client(tool_token)
+        _tool_clients[cache_key] = client
+        return client
+
+    # Default: lazy singleton built from DATABRICKS_TOKEN / profile.
     if _client is None:
         _client = WorkspaceClient()
     return _client
@@ -48,8 +110,13 @@ def get_workspace() -> WorkspaceClient:
 
 def set_workspace_for_tests(client: Any) -> None:
     """Override the singleton, e.g. with a MagicMock. Pass `None` to reset."""
-    global _client
+    global _client, _tool_clients, _test_override_active
     _client = client
+    _test_override_active = client is not None
+    if client is None:
+        # Also flush the per-tool cache so a previous test's per-tool
+        # client doesn't bleed across.
+        _tool_clients.clear()
 
 
 async def run_in_thread[T](fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
