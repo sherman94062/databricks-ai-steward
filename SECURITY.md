@@ -1,11 +1,118 @@
 # databricks-ai-steward — Threat Model
 
-Explicit boundaries: what this server defends against today, what it
-doesn't, and the test surface that proves the in-scope claims.
+Explicit boundaries: what this server defends against, what it doesn't,
+and the test surface that proves the in-scope claims.
 
-This is a *portfolio-stage* threat model — written when the server has
-exactly one live tool (`list_catalogs`) plus introspection (`health`).
-The model will tighten as the tool surface (and blast radius) grows.
+The current tool surface is seven live tools (`list_catalogs`, `health`,
+`execute_sql_safe`, `list_system_tables`, `recent_audit_events`,
+`recent_query_history`, `billing_summary`); the threat model below is
+sized for that surface and the planned read-only Databricks-data scope.
+
+---
+
+## Architecture and enforcement boundary
+
+```mermaid
+flowchart LR
+    User([Human user])
+    Agent[/AI agent: Claude Code, Cursor, custom client/]
+    Transport((MCP transport: stdio or HTTP))
+    subgraph steward [databricks-ai-steward — single trust principal]
+        direction TB
+        Auth[Bearer auth + bind safety]
+        Guard[ _guard: deterministic checks
+        rate-limit / governance gate / timeout / audit ]
+        Tools[Tool dispatch: only<br/>statically-registered tools]
+        Creds[Per-tool credential resolver]
+    end
+    SDK[(databricks-sdk + httpx)]
+    DBX[(Databricks workspace<br/>Unity Catalog grants enforced server-side)]
+
+    User --> Agent --> Transport --> Auth
+    Auth -->|reject 401| Transport
+    Auth --> Guard
+    Guard -->|rate-limit / SqlNotAllowed / ToolTimeout| Transport
+    Guard --> Tools --> Creds --> SDK --> DBX
+    DBX -->|results / PermissionDenied| SDK --> Tools --> Guard --> Transport
+
+    classDef enforce fill:#fef3c7,stroke:#b45309,color:#000
+    class Auth,Guard,Creds enforce
+```
+
+Enforcement layers (yellow above) are **deterministic Python**, not
+LLM-gated. The agent decides *which tool to call* and *what arguments
+to send*; nothing the agent says affects whether `_guard` lets the
+call through. See "Policy enforcement model" below for the explicit
+guarantees.
+
+---
+
+## MCP attack-surface taxonomy
+
+The MCP ecosystem inherits a specific class of attack patterns that
+generic threat models miss. Mapping each to our defense — for a CISO
+audit, this section is the most important one in the document.
+
+| MCP attack class | Description | Our defense | Test |
+|---|---|---|---|
+| **Tool injection / prompt-driven misuse** | The agent's prompt is hijacked to call legitimate tools with malicious arguments (e.g. `execute_sql_safe('DROP TABLE …')`). | Governance gate parses every SQL with sqlglot. SELECT/EXPLAIN/SHOW/DESCRIBE only; DML/DDL rejected including in CTEs and multi-statement input. | `probe_sql_governance` (13 forbidden classes) + `probe_adversarial` (31 attack-shaped inputs including comment hiding, case tricks, unicode lookalikes) + `test_sql_safety` (~25 unit cases) |
+| **Tool argument bleed / cross-tool confusion** | Arguments from one tool persist into another, or argument names mean something different per tool. | Tools take typed kwargs validated by FastMCP at the protocol layer; `_coerce_int` clamps numeric ranges; no shared mutable state across tool calls. | `test_system_table_tools` (arg clamping + reject of non-int args) + `probe_adversarial` argument-attack section |
+| **Server-side prompt injection (via tool responses)** | A malicious table value or audit row contains text designed to subvert the calling agent. | Out of scope at the steward layer — the agent client is responsible for sanitising tool output before re-prompting the model. We cap response size + redact host/token via `_scrub` to bound exposure, but we do not pretend to defang attacker-controlled SQL data. **Documented limitation; clients must sanitise.** | n/a — this is an agent-side concern |
+| **Tool poisoning / supply-chain compromise** | A malicious tool is registered (either upstream or via dynamic loading) that bypasses the governance gate. | All tools are *statically* registered at import time via `@safe_tool()` in `mcp_server/tools/*.py`. No dynamic tool loading, no plugin discovery, no `eval`. Every dependency pinned in `requirements.lock`. SBOM published per build (CycloneDX). pip-audit + Trivy gate in CI. | `requirements.lock` + CI `security` and `container-scan` jobs + grep `mcp_server/tools/` for the complete tool set |
+| **Privilege escalation via tool chaining** | An agent chains tools to reach data no single tool would allow (e.g. `list_system_tables` → `recent_audit_events` to enumerate which catalogs *exist*, then `execute_sql_safe` to read them). | Per-(tool, caller) rate limit caps the chain rate. Per-tool credential abstraction (`MCP_TOOL_TOKEN_<TOOL>`) enables giving each tool its own narrow Databricks SP, so chaining cannot exceed the union of the SP grants. | `test_audit_and_rate_limit` (rate limit + isolation) + `test_tool_credentials` |
+| **Data exfiltration via large reads** | Agent issues `SELECT * FROM big_table` and exfiltrates rows via the response. | Server-side row cap (`MCP_SQL_HARD_ROW_LIMIT`, default 1 000) enforced via SDK `row_limit` parameter (cannot be bypassed by adding `LIMIT` in the SQL). Response size cap (`MCP_MAX_RESPONSE_BYTES`, default 256 KB). | `test_sql_tools::test_row_limit_capped_at_hard_ceiling` |
+| **Data exfiltration via timing / side channel** | Agent encodes data into query timing or error-message variation. | `_scrub` redacts known secrets from error messages; rate limit bounds the iteration rate. Not fully mitigated — out-of-scope as a per-call concern, in-scope as a rate-limited concern. **Documented residual risk.** | n/a |
+| **Authentication confusion** | Mismatch between bearer-token-name, Databricks identity, and audit log creates false attribution. | `caller_id` contextvar set by bearer middleware; identical value flows into audit log + Databricks `query_tags`. Single source of truth. *Limitation: per-end-user identity gap if multiple humans share a bearer token — see known-limitation #3.* | `test_audit_and_rate_limit::test_caller_id_carries_into_audit_record` + `test_sql_tools::test_caller_id_propagates_to_databricks_query_tags` |
+| **Session hijacking** | Bearer token is captured and replayed. | TLS termination expected at the deployment layer; timing-safe `secrets.compare_digest`; rotation procedure documented in RUNBOOK. | manual review (TLS + rotation are operator-side) |
+| **Resource exhaustion / DoS** | Agent spam-calls tools to exhaust workspace API quota or our process. | Per-tool rate limit; tool timeout; SDK retries on 429; surplus surfaces as structured errors not crashes. Soak-tested at 1 000 calls / 5 min with no fd or RSS growth. | `probe_databricks_soak` + `probe_d_blast_radius` |
+| **Cancellation orphans / ghost queries** | Agent cancels mid-flight; workspace query keeps running until SDK timer expires. | `_execute_with_cancellation` calls `cancel_execution(statement_id)` on every cancellation path. Verified live: cancel propagates in <1 s, statement transitions to `CANCELED` at workspace. | `probe_sql_cancellation` (live) + `test_sql_tools::test_cancellation_calls_cancel_execution_at_databricks` |
+
+---
+
+## Policy enforcement model
+
+The CISO will ask: *"Is enforcement deterministic or LLM-based? What
+happens if the model fails open? Can tools be executed outside the
+steward?"* Explicit answers:
+
+1. **All enforcement is deterministic Python.** The governance gate
+   (sqlglot parse-tree walk), rate limiter (sliding-window token
+   bucket), per-tool credential resolver (env-var lookup), and
+   cancellation propagation (`asyncio.timeout` + `cancel_execution`)
+   run as ordinary Python code with no LLM in the path.
+2. **The LLM has no influence on the gate.** The agent decides
+   *which tool to call* and *what arguments to pass*. Whether the
+   call is admitted is decided entirely by the deterministic checks
+   in `_guard`. The model cannot "fail open" because there is no
+   model in the enforcement path.
+3. **Tool dispatch is gated.** FastMCP's tool registry is populated
+   exclusively by `@safe_tool()` decorations at module import time.
+   Any function not registered is unreachable; any function registered
+   passes through `_guard`. There is no escape hatch (`@mcp.tool()`
+   is technically callable but is documented as "only reach for it
+   if you have a specific reason" and skips the guards — every
+   in-tree tool uses `@safe_tool()`).
+4. **Fail-closed semantics.** Every check raises (or returns a
+   structured error response) on the negative path; nothing
+   silently allows. Specifically:
+   - Bearer auth missing/wrong → `401 Unauthorized`, no tool dispatch.
+   - Rate limit exceeded → `RateLimitExceeded` structured error,
+     tool body never executes.
+   - Governance gate rejects → `SqlNotAllowed` structured error,
+     no SDK call.
+   - Tool body raises → caught, scrubbed, returned as
+     `{"error": {"type": "...", ...}}`.
+   - Outer timeout fires → `ToolTimeout` returned; concurrent
+     `cancel_execution(statement_id)` cleans up at Databricks.
+5. **Tools cannot be executed outside the steward.** There is no
+   alternative entry point. The MCP transport (stdio, SSE,
+   streamable-http) is the only ingress; FastMCP's protocol handler
+   is the only dispatcher; `_guard` wraps every tool. No CLI subcommand,
+   no debug endpoint, no eval channel.
+
+The audit log, telemetry, and observability stack are *advisory*, not
+enforcement — they record what happened, they don't decide whether to
+let it happen. Enforcement is the four points above.
 
 ---
 

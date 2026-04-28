@@ -48,8 +48,31 @@ automatically, and the gaps are documented honestly.
 
 | Control | Defense | Evidence |
 |---|---|---|
-| **CC9.1** Identifies, selects, and develops risk mitigation activities | Documented threat model (in-scope, out-of-scope, known limitations) | [`SECURITY.md`](SECURITY.md) |
-| **CC9.2** Assesses and manages risks associated with vendors and business partners | Pinned dependency lockfile (`requirements.lock`); CycloneDX SBOM published per build; CI gates on dep CVEs | `requirements.lock`; CI artifact `sbom-<sha>.json` |
+| **CC9.1** Identifies, selects, and develops risk mitigation activities | Documented threat model (in-scope, out-of-scope, known limitations) including the MCP-specific attack-surface taxonomy | [`SECURITY.md`](SECURITY.md) |
+| **CC9.2** Assesses and manages risks associated with vendors and business partners | Pinned dependency lockfile (`requirements.lock`); CycloneDX SBOM published per build; CI gates on dep CVEs and container CVEs | `requirements.lock`; CI artifact `sbom-<sha>.json`; `.github/workflows/ci.yml` jobs `security` and `container-scan` |
+
+---
+
+## Supply-chain posture
+
+A specific area CISOs scrutinise for MCP servers, given the
+"tool ecosystem expands attack surface" framing in recent literature.
+Our posture, in one paragraph:
+
+**No dynamic tool loading.** Every tool the steward exposes is
+statically registered at module-import time via `@safe_tool()`
+decorations in `mcp_server/tools/*.py`. There is no plugin discovery,
+no `eval`, no dynamic import based on user input, no remote tool
+catalogue. The complete tool set is determinable by `grep -r
+"@safe_tool" mcp_server/tools/` against any commit. **One external
+dependency surface that touches data**: `databricks-sdk`. **One
+external dependency surface that touches the network**: `httpx` (used
+by the SDK). Both are pinned by exact version in `requirements.lock`,
+both are scanned for CVEs by `pip-audit` on every PR, and both are
+included in the SBOM (CycloneDX) generated per build. The container
+adds OS-level packages from `python:3.12-slim` (Debian-stable), scanned
+by Trivy on every PR. Every dependency change goes through PR review +
+the CI gates above before reaching `main`.
 
 ---
 
