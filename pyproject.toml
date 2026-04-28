@@ -21,6 +21,21 @@ dev = [
     "ruff>=0.6",
     "mypy>=1.10",
     "bandit>=1.7",
+    # Telemetry — optional at runtime (mcp_server/telemetry.py imports
+    # them lazily and falls back to a no-op tracer if absent), but in
+    # dev so CI exercises the integration path.
+    "opentelemetry-api>=1.27",
+    "opentelemetry-sdk>=1.27",
+    "opentelemetry-exporter-otlp-proto-http>=1.27",
+    "prometheus-client>=0.19",
+]
+telemetry = [
+    # Same as dev but without the test/lint stack — for production
+    # deployments that want traces + metrics.
+    "opentelemetry-api>=1.27",
+    "opentelemetry-sdk>=1.27",
+    "opentelemetry-exporter-otlp-proto-http>=1.27",
+    "prometheus-client>=0.19",
 ]
 http = [
     # Required for --transport sse and --transport streamable-http.

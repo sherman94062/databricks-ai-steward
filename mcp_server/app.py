@@ -119,7 +119,7 @@ def _guard(func: Callable, *, timeout_s: float | None = None) -> Callable:
     # Local imports to avoid pulling audit/rate_limit at app.py module
     # load time — keeps app.py importable from contexts that don't want
     # those side effects (e.g. some unit tests).
-    from mcp_server import audit, rate_limit
+    from mcp_server import audit, rate_limit, telemetry
 
     if inspect.iscoroutinefunction(func):
 
@@ -127,8 +127,10 @@ def _guard(func: Callable, *, timeout_s: float | None = None) -> Callable:
         async def wrapper(*args, **kwargs):
             global _in_flight_tools
             _in_flight_tools += 1
+            telemetry.in_flight_inc()
             tool_name = func.__name__
             request_id = audit.new_request_id()
+            caller = audit.current_caller_id()
             audit.emit_tool_start(tool_name, request_id, args, kwargs)
             # Make the tool name visible to downstream code (e.g.
             # databricks.client.get_workspace) so it can pick the
@@ -143,7 +145,7 @@ def _guard(func: Callable, *, timeout_s: float | None = None) -> Callable:
             #    in-flight calls; the bucket is incremented on entry,
             #    not on completion.
             try:
-                await rate_limit.check(tool_name, audit.current_caller_id())
+                await rate_limit.check(tool_name, caller)
             except rate_limit.RateLimitExceeded as e:
                 audit.emit_rate_limit_exceeded(
                     tool_name, request_id, e.limit.count, e.limit.window_s,
@@ -153,76 +155,90 @@ def _guard(func: Callable, *, timeout_s: float | None = None) -> Callable:
                     f"rate limit: {e.limit.count} calls per {e.limit.window_s}s "
                     f"for {tool_name!r} per caller",
                 )
-                latency_ms = (asyncio.get_event_loop().time() - t0) * 1000
+                latency_s = asyncio.get_event_loop().time() - t0
                 audit.emit_tool_end(
-                    tool_name, request_id, latency_ms,
+                    tool_name, request_id, latency_s * 1000,
                     outcome="rate_limited",
                     error_type="RateLimitExceeded",
                 )
+                telemetry.record_tool_call(tool_name, caller, "rate_limited", latency_s)
                 _in_flight_tools -= 1
+                telemetry.in_flight_dec()
                 audit.reset_current_tool(tool_ctx_token)
                 return resp
 
-            try:
-                if timeout_s is None:
-                    result = await func(*args, **kwargs)
-                else:
-                    # asyncio.timeout's `cm.expired()` is the only reliable way
-                    # to distinguish *our* deadline from a TimeoutError raised
-                    # by the tool itself (e.g. databricks-sdk's OperationTimeout
-                    # subclasses TimeoutError). Without this, every SDK timeout
-                    # would be misreported as our ToolTimeout.
-                    try:
-                        async with asyncio.timeout(timeout_s) as cm:
-                            result = await func(*args, **kwargs)
-                    except TimeoutError:
-                        if cm.expired():
-                            log.warning(
-                                "tool exceeded %.1fs timeout: %s",
-                                timeout_s, func.__name__,
-                            )
-                            return _error(
-                                "ToolTimeout",
-                                f"tool exceeded {timeout_s}s timeout and was cancelled server-side",
-                            )
-                        raise  # tool itself raised TimeoutError — let the generic handler classify
-            except Exception as e:
-                log.exception("tool raised: %s", func.__name__)
-                resp = _error(type(e).__name__, str(e))
-                latency_ms = (asyncio.get_event_loop().time() - t0) * 1000
-                audit.emit_tool_end(
-                    tool_name, request_id, latency_ms,
-                    outcome="error", error_type=type(e).__name__,
-                )
-                return resp
-            else:
-                capped = _cap_response(result)
-                latency_ms = (asyncio.get_event_loop().time() - t0) * 1000
-                error_type = None
-                if isinstance(capped, dict) and "error" in capped:
-                    err = capped["error"]
-                    if isinstance(err, dict):
-                        error_type = err.get("type")
-                outcome = "error" if error_type else "success"
-                response_bytes = None
+            with telemetry.tool_span(tool_name, request_id, caller):
                 try:
-                    response_bytes = len(json.dumps(capped, default=str))
-                except Exception:  # nosec B110 — audit-only, swallowed deliberately
-                    # response_bytes is best-effort metadata for the
-                    # audit log. If the (already-capped) payload still
-                    # can't be re-serialized — which can happen for
-                    # exotic types — drop the field rather than fail
-                    # the tool call.
-                    pass
-                audit.emit_tool_end(
-                    tool_name, request_id, latency_ms,
-                    outcome=outcome, error_type=error_type,
-                    response_bytes=response_bytes,
-                )
-                return capped
-            finally:
-                _in_flight_tools -= 1
-                audit.reset_current_tool(tool_ctx_token)
+                    if timeout_s is None:
+                        result = await func(*args, **kwargs)
+                    else:
+                        # asyncio.timeout's `cm.expired()` is the only reliable way
+                        # to distinguish *our* deadline from a TimeoutError raised
+                        # by the tool itself (e.g. databricks-sdk's OperationTimeout
+                        # subclasses TimeoutError). Without this, every SDK timeout
+                        # would be misreported as our ToolTimeout.
+                        try:
+                            async with asyncio.timeout(timeout_s) as cm:
+                                result = await func(*args, **kwargs)
+                        except TimeoutError:
+                            if cm.expired():
+                                log.warning(
+                                    "tool exceeded %.1fs timeout: %s",
+                                    timeout_s, func.__name__,
+                                )
+                                latency_s = asyncio.get_event_loop().time() - t0
+                                audit.emit_tool_end(
+                                    tool_name, request_id, latency_s * 1000,
+                                    outcome="timeout", error_type="ToolTimeout",
+                                )
+                                telemetry.record_tool_call(
+                                    tool_name, caller, "timeout", latency_s,
+                                )
+                                return _error(
+                                    "ToolTimeout",
+                                    f"tool exceeded {timeout_s}s timeout and was cancelled server-side",
+                                )
+                            raise  # tool itself raised TimeoutError — let the generic handler classify
+                except Exception as e:
+                    log.exception("tool raised: %s", func.__name__)
+                    resp = _error(type(e).__name__, str(e))
+                    latency_s = asyncio.get_event_loop().time() - t0
+                    audit.emit_tool_end(
+                        tool_name, request_id, latency_s * 1000,
+                        outcome="error", error_type=type(e).__name__,
+                    )
+                    telemetry.record_tool_call(tool_name, caller, "error", latency_s)
+                    return resp
+                else:
+                    capped = _cap_response(result)
+                    latency_s = asyncio.get_event_loop().time() - t0
+                    error_type = None
+                    if isinstance(capped, dict) and "error" in capped:
+                        err = capped["error"]
+                        if isinstance(err, dict):
+                            error_type = err.get("type")
+                    outcome = "error" if error_type else "success"
+                    response_bytes = None
+                    try:
+                        response_bytes = len(json.dumps(capped, default=str))
+                    except Exception:  # nosec B110 — audit-only, swallowed deliberately
+                        # response_bytes is best-effort metadata for the
+                        # audit log. If the (already-capped) payload still
+                        # can't be re-serialized — which can happen for
+                        # exotic types — drop the field rather than fail
+                        # the tool call.
+                        pass
+                    audit.emit_tool_end(
+                        tool_name, request_id, latency_s * 1000,
+                        outcome=outcome, error_type=error_type,
+                        response_bytes=response_bytes,
+                    )
+                    telemetry.record_tool_call(tool_name, caller, outcome, latency_s)
+                    return capped
+                finally:
+                    _in_flight_tools -= 1
+                    telemetry.in_flight_dec()
+                    audit.reset_current_tool(tool_ctx_token)
 
         return wrapper
 

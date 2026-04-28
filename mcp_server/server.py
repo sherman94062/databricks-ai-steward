@@ -107,13 +107,25 @@ def _build_starlette_app(transport: str):
     app.routes.insert(0, Route("/healthz", _healthz, methods=["GET"]))
     app.routes.insert(1, Route("/readyz", _readyz, methods=["GET"]))
 
+    # ---- /metrics (Prometheus) ------------------------------------------
+    # Opt-in via MCP_PROMETHEUS_ENABLED. If enabled and the
+    # prometheus_client dep is installed, we expose /metrics. Bypasses
+    # bearer auth so scrapers don't need credentials — same posture as
+    # /healthz and /readyz, and the metric values are not sensitive
+    # (they're aggregates, no caller-supplied data).
+    from mcp_server import telemetry
+    metrics_handler = telemetry.prometheus_app()
+    if metrics_handler is not None:
+        app.routes.insert(2, Route("/metrics", metrics_handler, methods=["GET"]))
+        log.warning("Prometheus /metrics enabled")
+
     # ---- bearer auth -----------------------------------------------------
     if token:
         expected = f"Bearer {token}"
         # Paths the auth middleware lets through unauthenticated. Probes
-        # belong to the orchestrator, not the API surface, so they're
-        # always accessible.
-        unauthenticated_paths = {"/healthz", "/readyz"}
+        # and metrics belong to the orchestrator (k8s, scrapers), not
+        # the API surface, so they're always accessible.
+        unauthenticated_paths = {"/healthz", "/readyz", "/metrics"}
 
         class _BearerAuth(BaseHTTPMiddleware):
             async def dispatch(self, request, call_next):
