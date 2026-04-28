@@ -35,11 +35,16 @@ _log = logging.getLogger("mcp_server.audit")
 
 # Caller identity for the *current* in-flight request. Transport layers
 # (stdio entry, bearer-auth middleware) overwrite this per-call; tools
-# read it via `current_caller_id`.
-_caller_id: contextvars.ContextVar[str] = contextvars.ContextVar(
-    "mcp_caller_id",
-    default=os.environ.get("MCP_CALLER_ID", "unknown"),
+# read it via `current_caller_id`. The contextvar itself defaults to
+# None to satisfy ruff B039 (mutable default); `current_caller_id`
+# substitutes the env-derived process default at read time.
+_caller_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "mcp_caller_id", default=None,
 )
+
+
+def _process_default_caller() -> str:
+    return os.environ.get("MCP_CALLER_ID", "unknown")
 
 
 def set_caller_id(caller: str) -> contextvars.Token:
@@ -54,7 +59,7 @@ def reset_caller_id(token: contextvars.Token) -> None:
 
 
 def current_caller_id() -> str:
-    return _caller_id.get()
+    return _caller_id.get() or _process_default_caller()
 
 
 def new_request_id() -> str:

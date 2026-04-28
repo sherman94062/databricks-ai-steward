@@ -160,6 +160,32 @@ per-tool sub-credentialing yet.
 | `MCP_CALLER_ID` | Default caller identity for this process. Overridden per-request by transport-layer hooks (e.g. bearer-auth middleware). | `unknown` |
 | `MCP_BEARER_TOKEN_NAME` | Caller identity used in audit + Databricks `query_tags` when a request authenticates with `MCP_BEARER_TOKEN`. | `bearer-authenticated` |
 | `MCP_RATE_LIMIT` | Per-tool overrides, e.g. `execute_sql_safe=10/60,*=200/60`. Each entry is `tool=count/window_seconds`; `*` matches any tool not explicitly listed. | (defaults applied) |
+
+## k8s integration
+
+HTTP transports expose two unauthenticated probe endpoints. Both
+return plain-text bodies so they're easy to read in `kubectl describe`:
+
+| Endpoint | Returns | Probe type |
+|---|---|---|
+| `GET /healthz` | `200 ok` while the process is alive | `livenessProbe` |
+| `GET /readyz` | `200 ready` normally; `503 draining` once shutdown is signalled | `readinessProbe` |
+
+The Dockerfile's `HEALTHCHECK` directive uses `/healthz` so
+docker-managed restarts work the same way k8s does. Both probes
+bypass `MCP_BEARER_TOKEN` — orchestrators don't have the token, and
+exposing liveness state is not a meaningful information leak.
+
+Sample manifest snippet:
+
+```yaml
+livenessProbe:
+  httpGet: {path: /healthz, port: 8765}
+  periodSeconds: 30
+readinessProbe:
+  httpGet: {path: /readyz, port: 8765}
+  periodSeconds: 5
+```
 | `MCP_SHUTDOWN_GRACE_S` | Stdio graceful shutdown deadline | `5` |
 | `MCP_CLEANUP_TIMEOUT_S` | Per cleanup-callback deadline | `2` |
 | `MCP_LOG_LEVEL` | Logger level (stderr only) | `WARNING` |

@@ -186,3 +186,44 @@ def test_rate_limit_parse_overrides():
 def test_rate_limit_parse_overrides_skips_garbage():
     parsed = rate_limit._parse_overrides("good=5/60,bad,=,foo=abc/def")
     assert parsed == {"good": rate_limit._Limit(5, 60)}
+
+
+# ---- k8s probe endpoints ---------------------------------------------------
+# Single test exercising both probes + the bearer-auth bypass — the
+# FastMCP streamable-http session manager is a singleton that can't be
+# rebuilt mid-process, so we share one app across all assertions.
+
+def test_k8s_probes_bypass_bearer_auth_and_track_drain_state(monkeypatch):
+    monkeypatch.setenv("MCP_BEARER_TOKEN", "test-token-1234567890")
+
+    from starlette.testclient import TestClient
+
+    from mcp_server import lifecycle
+    from mcp_server.server import _build_starlette_app
+
+    app = _build_starlette_app("streamable-http")
+    with TestClient(app) as c:
+        # /healthz is always 200 when the process is alive — no auth needed.
+        r = c.get("/healthz")
+        assert r.status_code == 200
+        assert r.text.strip() == "ok"
+
+        # /readyz is 200 when not shutting down — no auth needed.
+        r = c.get("/readyz")
+        assert r.status_code == 200
+        assert r.text.strip() == "ready"
+
+        # /mcp requires bearer auth — probes are special-cased, the
+        # actual API surface is not.
+        assert c.get("/mcp").status_code == 401
+
+        # Flip the drain flag — /readyz reports 503, /healthz stays 200,
+        # /mcp's auth requirement is unchanged.
+        try:
+            lifecycle._shutting_down = True
+            r = c.get("/readyz")
+            assert r.status_code == 503
+            assert r.text.strip() == "draining"
+            assert c.get("/healthz").status_code == 200
+        finally:
+            lifecycle._shutting_down = False

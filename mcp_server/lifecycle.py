@@ -26,8 +26,8 @@ import os
 import signal
 import sys
 import time
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
-from typing import AsyncIterator, Awaitable, Callable
 
 from mcp.server.fastmcp import FastMCP
 
@@ -96,7 +96,7 @@ async def lifespan(server: FastMCP) -> AsyncIterator[None]:
             for cb in _cleanup_callbacks:
                 try:
                     await asyncio.wait_for(cb(), timeout=CLEANUP_TIMEOUT_S)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     log.warning("cleanup callback %s exceeded %.1fs",
                                 getattr(cb, "__name__", repr(cb)), CLEANUP_TIMEOUT_S)
                 except Exception:
@@ -142,9 +142,14 @@ async def run_with_lifecycle(mcp: FastMCP) -> None:
             loop.add_signal_handler(sig, _on_signal, name)
         except NotImplementedError:
             # Windows: add_signal_handler isn't supported. Fall back.
+            # Bind `name` via default-arg so each handler captures its
+            # own value (otherwise both would see the loop's last value).
             log.warning("loop.add_signal_handler unavailable for %s; "
                         "using signal.signal fallback", name)
-            signal.signal(sig, lambda *_: loop.call_soon_threadsafe(_on_signal, name))
+            signal.signal(
+                sig,
+                lambda *_, _n=name: loop.call_soon_threadsafe(_on_signal, _n),
+            )
 
     server_task = asyncio.create_task(mcp.run_stdio_async(), name="mcp-server")
     shutdown_watch = asyncio.create_task(_shutdown_event.wait(), name="shutdown-watch")
@@ -162,7 +167,7 @@ async def run_with_lifecycle(mcp: FastMCP) -> None:
             log.warning("server cancelled cleanly")
         except asyncio.CancelledError:
             log.warning("server cancelled cleanly")
-        except asyncio.TimeoutError:
+        except TimeoutError:
             log.warning("server did not stop within %.1fs grace; abandoning",
                         SHUTDOWN_GRACE_S)
     else:

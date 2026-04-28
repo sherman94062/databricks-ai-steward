@@ -14,7 +14,8 @@ import json
 import logging
 import os
 import sys
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
@@ -199,7 +200,12 @@ def _guard(func: Callable, *, timeout_s: float | None = None) -> Callable:
                 response_bytes = None
                 try:
                     response_bytes = len(json.dumps(capped, default=str))
-                except Exception:
+                except Exception:  # nosec B110 — audit-only, swallowed deliberately
+                    # response_bytes is best-effort metadata for the
+                    # audit log. If the (already-capped) payload still
+                    # can't be re-serialized — which can happen for
+                    # exotic types — drop the field rather than fail
+                    # the tool call.
                     pass
                 audit.emit_tool_end(
                     tool_name, request_id, latency_ms,
@@ -213,7 +219,7 @@ def _guard(func: Callable, *, timeout_s: float | None = None) -> Callable:
         return wrapper
 
     @functools.wraps(func)
-    def wrapper(*args, **kwargs):
+    def sync_wrapper(*args, **kwargs):
         global _in_flight_tools
         _in_flight_tools += 1
         try:
@@ -226,7 +232,7 @@ def _guard(func: Callable, *, timeout_s: float | None = None) -> Callable:
         finally:
             _in_flight_tools -= 1
 
-    return wrapper
+    return sync_wrapper
 
 
 def safe_tool(

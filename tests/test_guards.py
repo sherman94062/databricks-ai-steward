@@ -9,7 +9,7 @@ from __future__ import annotations
 import pytest
 
 from mcp_server import app
-from mcp_server.app import _guard, _cap_response
+from mcp_server.app import _cap_response, _guard
 
 
 def test_normal_return_passes_through():

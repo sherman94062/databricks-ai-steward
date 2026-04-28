@@ -25,7 +25,11 @@ from dotenv import load_dotenv
 
 from mcp_server.app import log, mcp
 from mcp_server.lifecycle import run_with_lifecycle
-from mcp_server.tools import basic_tools, health, sql_tools  # noqa: F401 — imported for side-effect of registering tools
+from mcp_server.tools import (  # noqa: F401 — imported for side-effect of registering tools
+    basic_tools,
+    health,
+    sql_tools,
+)
 
 load_dotenv()
 
@@ -64,7 +68,8 @@ def _parse_args() -> argparse.Namespace:
 
 def _build_starlette_app(transport: str):
     """Build the Starlette app for the given HTTP transport, wrapping
-    with bearer-auth middleware if MCP_BEARER_TOKEN is set."""
+    with k8s probe routes (always) and bearer-auth middleware (if
+    MCP_BEARER_TOKEN is set)."""
     if transport == "sse":
         app = mcp.sse_app()
     else:  # streamable-http
@@ -74,15 +79,46 @@ def _build_starlette_app(transport: str):
     bearer_caller = os.environ.get("MCP_BEARER_TOKEN_NAME", "").strip() or "bearer-authenticated"
 
     from starlette.middleware.base import BaseHTTPMiddleware
-    from starlette.responses import JSONResponse
+    from starlette.responses import JSONResponse, PlainTextResponse
+    from starlette.routing import Route
 
-    from mcp_server import audit
+    from mcp_server import audit, lifecycle
 
+    # ---- k8s probe routes ------------------------------------------------
+    # /healthz: process is alive. Used as the liveness probe — k8s restarts
+    #           the pod if this fails repeatedly.
+    # /readyz:  process can serve new requests. Returns 503 once shutdown
+    #           is signalled so a rolling-update load balancer drains us
+    #           before SIGKILL. Used as the readiness probe.
+    # Both bypass bearer auth (operators don't have the token; orchestrators
+    # need to probe regardless of auth state).
+
+    async def _healthz(_request):
+        return PlainTextResponse("ok\n")
+
+    async def _readyz(_request):
+        if lifecycle.is_shutting_down():
+            return PlainTextResponse("draining\n", status_code=503)
+        return PlainTextResponse("ready\n")
+
+    # FastMCP's app already has an internal route table; we prepend ours
+    # so they take precedence and bypass the bearer-auth middleware
+    # added below.
+    app.routes.insert(0, Route("/healthz", _healthz, methods=["GET"]))
+    app.routes.insert(1, Route("/readyz", _readyz, methods=["GET"]))
+
+    # ---- bearer auth -----------------------------------------------------
     if token:
         expected = f"Bearer {token}"
+        # Paths the auth middleware lets through unauthenticated. Probes
+        # belong to the orchestrator, not the API surface, so they're
+        # always accessible.
+        unauthenticated_paths = {"/healthz", "/readyz"}
 
         class _BearerAuth(BaseHTTPMiddleware):
             async def dispatch(self, request, call_next):
+                if request.url.path in unauthenticated_paths:
+                    return await call_next(request)
                 got = request.headers.get("authorization", "")
                 if not secrets.compare_digest(got, expected):
                     return JSONResponse(

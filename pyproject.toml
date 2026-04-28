@@ -17,6 +17,10 @@ dev = [
     # Required by stress/probe_langchain_compat.py — verifies the
     # langchain-ai/langchain-mcp-adapters wrapper can load our tools.
     "langchain-mcp-adapters>=0.1",
+    # Lint, type-check, and security-scan in CI.
+    "ruff>=0.6",
+    "mypy>=1.10",
+    "bandit>=1.7",
 ]
 http = [
     # Required for --transport sse and --transport streamable-http.
@@ -32,3 +36,39 @@ packages = ["mcp_server"]
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.ruff]
+line-length = 100
+extend-exclude = [".venv", "stress/ts/node_modules"]
+
+[tool.ruff.lint]
+# Sensible defaults for a small Python service. Tighten later if useful.
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = [
+    "E501",   # line too long — many docstrings deliberately verbose
+    "B008",   # function calls in defaults — pydantic-ish patterns
+]
+# Tests can use plain assert, magic numbers, etc.
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["B"]
+"stress/**" = ["B", "E402"]
+
+[tool.mypy]
+# We aren't typing exhaustively (yet); just catch the obvious bugs.
+python_version = "3.12"
+ignore_missing_imports = true
+namespace_packages = true
+explicit_package_bases = true
+mypy_path = "."
+# Don't follow into dependencies' internals.
+follow_imports = "silent"
+# Skip the namespace-collision file: client.py also lives under the
+# `databricks` namespace package via databricks-sdk.
+exclude = [
+    "stress/ts/",
+]
+
+[tool.bandit]
+# bandit's default skipset; we suppress findings inline with `# nosec` and
+# a comment explaining why. Don't scan tests / probes / venv.
+exclude_dirs = ["tests", "stress", ".venv"]

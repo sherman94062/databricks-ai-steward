@@ -21,10 +21,10 @@ gate. Databricks itself enforces grants on whatever runs.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 import sqlglot
 from sqlglot import exp
-
 
 ALLOWED_KINDS = frozenset({
     "SELECT",
@@ -58,15 +58,15 @@ class Verdict:
     reason: str | None      # populated when allowed=False
 
     @classmethod
-    def allow(cls, kind: str) -> "Verdict":
+    def allow(cls, kind: str) -> Verdict:
         return cls(allowed=True, kind=kind, reason=None)
 
     @classmethod
-    def reject(cls, kind: str, reason: str) -> "Verdict":
+    def reject(cls, kind: str, reason: str) -> Verdict:
         return cls(allowed=False, kind=kind, reason=reason)
 
 
-def _statement_kind(stmt: exp.Expression) -> str:
+def _statement_kind(stmt: Any) -> str:
     """Map a sqlglot top-level expression to one of ALLOWED_KINDS or
     a free-form identifier for the error message."""
     if isinstance(stmt, (exp.Select, exp.Union, exp.Except, exp.Intersect)):
@@ -91,7 +91,7 @@ def _statement_kind(stmt: exp.Expression) -> str:
     return type(stmt).__name__.upper()
 
 
-def _walk_for_forbidden(stmt: exp.Expression) -> exp.Expression | None:
+def _walk_for_forbidden(stmt: Any) -> Any:
     """Search the parsed tree for any DML/DDL node nested at any depth.
     Returns the first offending node or None."""
     for node in stmt.walk():

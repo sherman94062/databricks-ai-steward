@@ -9,10 +9,10 @@ Verify each:
 
 from __future__ import annotations
 
-import pytest
 from unittest.mock import MagicMock
 
 import httpx
+import pytest
 from databricks.sdk.errors import (
     DatabricksError,
     InternalError,

@@ -17,30 +17,69 @@ the stdio session.
 
 ---
 
-## Quick start
+## Two deployment shapes
+
+The same codebase serves two very different audiences. Pick the one
+that matches your situation.
+
+### Shape A — local dev, Claude / Cursor / IDE clients
+
+The MCP client (Claude Code, Claude Desktop, Cursor, Cline, etc.)
+spawns the server as a **stdio subprocess**. There is no Docker, no
+HTTP server, no port to expose. This is what you want if you're using
+the steward to interact with Databricks from your own AI assistant.
 
 ```bash
 source .venv/bin/activate
-pip install -e '.[dev]'             # add ',http' for HTTP transports
+pip install -e '.[dev]'
 
 # Auth — minimum required to call list_catalogs against a workspace
 echo "DATABRICKS_HOST=https://<your-workspace>.cloud.databricks.com" >> .env
 echo "DATABRICKS_TOKEN=dapi..." >> .env
 
-# Run the server — choose a transport
-python -m mcp_server.server                              # stdio (default)
-python -m mcp_server.server --transport streamable-http  # http://127.0.0.1:8765/mcp
-python -m mcp_server.server --transport sse              # http://127.0.0.1:8765/sse
+# Smoke-test it directly
+python -m mcp_server.server   # blocks waiting for an MCP client on stdio
 
-# Register with Claude Code (stdio)
+# Or register with Claude Code
 claude mcp add databricks-steward -- python -m mcp_server.server
 
-# Tests
 pytest tests/
 ```
 
-See [`WALKTHROUGH.md`](WALKTHROUGH.md) for the full setup and
-tool-authoring guide.
+Per-client configuration recipes (Claude Desktop, Cursor, Goose,
+LangChain) live in [`COMPATIBILITY.md`](COMPATIBILITY.md).
+
+### Shape B — production HTTP service
+
+A fintech that wants to expose this to many agents (or to a hosted
+agent platform) deploys it as an HTTP service behind a reverse proxy
+or ingress. The container ships with `streamable-http` as the default
+transport and binds `0.0.0.0:8765`.
+
+```bash
+docker build -t databricks-ai-steward:dev .
+
+docker run --rm -p 8765:8765 \
+  -e DATABRICKS_HOST=https://<workspace>.cloud.databricks.com \
+  -e DATABRICKS_TOKEN=dapi... \
+  -e MCP_BEARER_TOKEN=$(openssl rand -hex 32) \
+  -e MCP_BEARER_TOKEN_NAME=team-data \
+  databricks-ai-steward:dev
+```
+
+Liveness / readiness endpoints for k8s (`GET /healthz`, `GET /readyz`)
+are always reachable without auth so orchestrators can probe without
+the bearer token. Everything else (`/mcp`, `/sse`) requires
+`Authorization: Bearer <MCP_BEARER_TOKEN>`. See
+[`SECURITY.md`](SECURITY.md) for the full env-var reference and
+threat model.
+
+Run the server *outside* a container the same way — just set
+`--transport streamable-http` and pick a port:
+
+```bash
+python -m mcp_server.server --transport streamable-http --port 8765
+```
 
 ### Transports
 

@@ -20,10 +20,10 @@ from typing import Any
 
 from databricks.sdk.service.sql import (
     Disposition,
+    ExecuteStatementRequestOnWaitTimeout,
     Format,
     QueryTag,
     StatementState,
-    ExecuteStatementRequestOnWaitTimeout,
 )
 
 from mcp_server.app import safe_tool
@@ -35,7 +35,6 @@ from mcp_server.databricks.client import (
     run_in_thread,
 )
 from mcp_server.databricks.sql_safety import classify
-
 
 _DEFAULT_ROW_LIMIT = int(os.environ.get("MCP_SQL_ROW_LIMIT", "100"))
 _HARD_ROW_LIMIT = int(os.environ.get("MCP_SQL_HARD_ROW_LIMIT", "1000"))
@@ -106,9 +105,17 @@ def _coerce_int(value, name: str, lo: int, hi: int) -> int:
 
 
 def _rows_to_dicts(payload: dict) -> list[dict]:
-    """Reshape an execute_sql_safe success payload into [{col_name: value, ...}]."""
+    """Reshape an execute_sql_safe success payload into [{col_name: value, ...}].
+
+    `strict=False` is intentional: Databricks' INLINE format always
+    returns row tuples whose width matches the schema, but on the
+    margin (e.g. when a row is malformed and the SDK truncates) we
+    prefer to emit a partial dict over raising mid-call. The
+    underlying invariant — len(row) == len(cols) — is enforced by
+    Databricks, not by us.
+    """
     cols = [c["name"] for c in payload.get("columns", [])]
-    return [dict(zip(cols, row)) for row in payload.get("rows", [])]
+    return [dict(zip(cols, row, strict=False)) for row in payload.get("rows", [])]
 
 
 @safe_tool(timeout_s=60)
@@ -240,15 +247,19 @@ async def recent_audit_events(
     # selected partitions. Without the date filter this query scans
     # everything and times out on high-volume workspaces.
     days = max(1, (h + 23) // 24)
+    # nosec B608 — h, n, days are all int-validated and clamped via
+    # _coerce_int before they reach this f-string. No user-controlled
+    # text can flow into the SQL. The constructed statement also
+    # passes the sqlglot governance gate inside execute_sql_safe.
     sql = (
         "SELECT event_time, user_identity.email AS user_email, "
         "service_name, action_name, response.status_code AS status_code, "
         "request_params "
         "FROM system.access.audit "
-        f"WHERE event_date >= current_date() - INTERVAL {days} DAYS "
-        f"  AND event_time > current_timestamp() - INTERVAL {h} HOURS "
+        f"WHERE event_date >= current_date() - INTERVAL {days} DAYS "  # nosec B608
+        f"  AND event_time > current_timestamp() - INTERVAL {h} HOURS "  # nosec B608
         "ORDER BY event_time DESC "
-        f"LIMIT {n}"
+        f"LIMIT {n}"  # nosec B608
     )
     raw = await execute_sql_safe(sql, row_limit=n, wait_timeout_s=50)
     if "error" in raw:
@@ -275,13 +286,14 @@ async def recent_query_history(
     """
     h = _coerce_int(since_hours, "since_hours", 1, 168)
     n = _coerce_int(limit, "limit", 1, 200)
+    # nosec B608 — h, n are int-validated by _coerce_int.
     sql = (
         "SELECT start_time, executed_by, execution_status, statement_type, "
         "total_duration_ms, produced_rows, statement_text, error_message "
         "FROM system.query.history "
-        f"WHERE start_time > current_timestamp() - INTERVAL {h} HOURS "
+        f"WHERE start_time > current_timestamp() - INTERVAL {h} HOURS "  # nosec B608
         "ORDER BY start_time DESC "
-        f"LIMIT {n}"
+        f"LIMIT {n}"  # nosec B608
     )
     raw = await execute_sql_safe(sql, row_limit=n)
     if "error" in raw:
@@ -303,13 +315,14 @@ async def billing_summary(since_days: int = 7) -> dict:
         since_days: lookback window in days. Clamped to [1, 90].
     """
     d = _coerce_int(since_days, "since_days", 1, 90)
+    # nosec B608 — d is int-validated by _coerce_int.
     sql = (
         "SELECT sku_name, billing_origin_product, "
         "sum(usage_quantity) AS total_units, "
         "count(*) AS record_count, "
         "any_value(usage_unit) AS unit "
         "FROM system.billing.usage "
-        f"WHERE usage_date > current_date() - INTERVAL {d} DAYS "
+        f"WHERE usage_date > current_date() - INTERVAL {d} DAYS "  # nosec B608
         "GROUP BY sku_name, billing_origin_product "
         "ORDER BY total_units DESC"
     )

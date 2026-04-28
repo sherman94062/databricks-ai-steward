@@ -14,13 +14,11 @@ from __future__ import annotations
 
 import asyncio
 import os
-from typing import Any, Awaitable, Callable, TypeVar
+from collections.abc import Callable
+from typing import Any
 
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.sql import State as WarehouseState
-
-
-T = TypeVar("T")
 
 
 class WarehouseUnavailable(RuntimeError):
@@ -54,7 +52,7 @@ def set_workspace_for_tests(client: Any) -> None:
     _client = client
 
 
-async def run_in_thread(fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
+async def run_in_thread[T](fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
     """Dispatch a synchronous SDK call to a worker thread.
 
     `databricks-sdk` is sync-by-design. Calling it directly from an
@@ -84,18 +82,18 @@ def resolve_warehouse_id(explicit: str | None = None) -> str:
         return from_env
 
     ws = get_workspace()
-    running = [
-        w for w in ws.warehouses.list()
-        if w.state == WarehouseState.RUNNING and w.id
-    ]
-    if running:
+    all_warehouses = [w for w in ws.warehouses.list() if w.id]
+    running = [w for w in all_warehouses if w.state == WarehouseState.RUNNING]
+    # mypy can't narrow .id from `str | None` through the truthiness
+    # filter above, so we re-check explicitly. (asserts are bandit-flagged
+    # since they're stripped under -O.)
+    if running and running[0].id is not None:
         return running[0].id
 
     # Fallback: any warehouse at all, even if STOPPED — Databricks will
     # auto-start it on first statement, which is slow but correct.
-    any_wh = [w for w in ws.warehouses.list() if w.id]
-    if any_wh:
-        return any_wh[0].id
+    if all_warehouses and all_warehouses[0].id is not None:
+        return all_warehouses[0].id
 
     raise WarehouseUnavailable(
         "no SQL warehouse available — set MCP_DATABRICKS_WAREHOUSE_ID or pass "
