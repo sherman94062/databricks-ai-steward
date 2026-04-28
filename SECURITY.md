@@ -94,6 +94,23 @@ per-tool sub-credentialing yet.
 3. **Bearer auth is bring-your-own.** No built-in identity provider, no
    token rotation, no per-caller scope. Pair with a reverse proxy for
    anything beyond loopback dev use.
+
+   **Per-end-user identity gap.** When `MCP_BEARER_TOKEN` is set, every
+   authenticated request gets `caller_id = MCP_BEARER_TOKEN_NAME` —
+   *bearer-token-level* attribution, not per-end-user. If multiple
+   humans share a single bearer token (typical for a shared-deployment
+   model where the platform owns the steward and individual analysts
+   hit it through an agent), the audit log + Databricks `query_tags`
+   cannot tell them apart. Closing this gap requires either:
+   - an OAuth-per-user flow at the HTTP layer, or
+   - a trust relationship with an upstream proxy that propagates a
+     header like `X-End-User: <id>` which the bearer middleware
+     reads into the `caller_id` contextvar in addition to the
+     bearer-token name.
+
+   Both approaches are middleware additions (no SDK or transport
+   changes) — picking which depends on how Drew's identity story
+   shakes out.
 4. **Cancellation propagation depends on local fix.** Until
    [python-sdk#2507](https://github.com/modelcontextprotocol/python-sdk/issues/2507)
    ships, the server-side per-tool timeout is the only thing bounding
@@ -119,7 +136,26 @@ per-tool sub-credentialing yet.
    Worth knowing if you ever expose this server to many simultaneous
    agents.
 
-7. **No server-side rate limit.** A misbehaving client can spam tool
+7. **Warehouse-level isolation is a deployment choice, not a code
+   constraint.** `MCP_DATABRICKS_WAREHOUSE_ID` (or the
+   resolver's "first running" fallback) points the steward at *a*
+   warehouse — but doesn't enforce that the warehouse has narrow
+   grants. For production at a regulated workplace, the recommended
+   pattern is:
+
+   - one *dedicated* SQL warehouse for the steward, sized for
+     interactive analytics workloads (not training/ETL)
+   - the steward's service principal has `USE_CATALOG` / `USE_SCHEMA`
+     / `SELECT` only on non-PII tables in that warehouse's UC scope
+   - sensitive payments / KYC / PCI tables live under catalogs the
+     steward's SP has no grant on — Databricks rejects the query
+     before the steward's governance gate even sees it
+
+   The per-tool credential abstraction (`MCP_TOOL_TOKEN_<TOOL>`) is
+   the runtime hook that lets each tool use a *different* SP if the
+   "one isolated warehouse" model is too coarse.
+
+8. **No server-side rate limit.** A misbehaving client can spam tool
    calls up to the workspace's API rate limit, then start eating 429s.
    What does happen for free, before our code sees the error:
    - **Databricks** returns `429 Too Many Requests` with a

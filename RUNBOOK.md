@@ -312,6 +312,22 @@ Databricks service principal per tool, each with the minimum grants
 that tool needs. The steward then never holds a credential broad
 enough to exfiltrate everything.
 
+**Pair this with a dedicated SQL warehouse.** The runtime per-tool
+credential separation is only one half of the isolation story; the
+other half is *which warehouse those credentials can run on*. A
+production deployment for a regulated workload should:
+
+1. provision a dedicated, separately-budgeted SQL warehouse for the
+   steward (interactive size, not your ETL warehouse)
+2. set `MCP_DATABRICKS_WAREHOUSE_ID` to that warehouse so the resolver
+   never falls back to the "first running" warehouse — which would
+   silently include unrelated workloads
+3. ensure the steward's SPs hold only `USE_CATALOG` / `USE_SCHEMA` /
+   `SELECT` grants on non-sensitive tables — sensitive data
+   (payments / KYC / PCI) lives in catalogs the steward's SPs are
+   not granted on, so Databricks rejects those queries before they
+   reach our governance gate.
+
 ### Bearer token (`MCP_BEARER_TOKEN`)
 
 1. Generate a new value: `openssl rand -hex 32`.
