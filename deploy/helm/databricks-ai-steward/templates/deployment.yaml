@@ -116,6 +116,10 @@ spec:
             - name: MCP_RATE_LIMIT
               value: {{ .Values.config.rateLimit | quote }}
             {{- end }}
+            {{- if .Values.config.dbuRateCard }}
+            - name: MCP_DBU_RATE_CARD
+              value: {{ .Values.config.dbuRateCard | quote }}
+            {{- end }}
             {{- if .Values.config.otelExporterOtlpEndpoint }}
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: {{ .Values.config.otelExporterOtlpEndpoint | quote }}

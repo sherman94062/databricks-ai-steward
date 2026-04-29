@@ -106,6 +106,108 @@ async def test_billing_summary_clamps_to_90_days(mock_execute_sql_safe):
 
 
 @pytest.mark.asyncio
+async def test_billing_summary_no_rate_card_returns_dbu_only(mock_execute_sql_safe, monkeypatch):
+    """Default behavior — no MCP_DBU_RATE_CARD set. Response must not
+    include cost_usd / total_usd. Preserves the contract for callers
+    that have always parsed the DBU-only shape."""
+    monkeypatch.delenv("MCP_DBU_RATE_CARD", raising=False)
+    mock_execute_sql_safe.return_value = _ok_payload(
+        rows=[["SQL_COMPUTE", "SQL", "100.0", "5", "DBU"]],
+        cols=["sku_name", "billing_origin_product", "total_units", "record_count", "unit"],
+    )
+    r = await sql_tools.billing_summary(since_days=7)
+    assert "cost_usd" not in r["summary"][0]
+    assert "total_usd" not in r
+    assert "rate_card_applied" not in r
+
+
+@pytest.mark.asyncio
+async def test_billing_summary_with_rate_card_adds_dollars(mock_execute_sql_safe, monkeypatch):
+    """When MCP_DBU_RATE_CARD is set with an exact SKU match, each
+    matching row gets cost_usd and the response carries total_usd."""
+    monkeypatch.setenv("MCP_DBU_RATE_CARD", '{"PREMIUM_SQL": 0.55}')
+    mock_execute_sql_safe.return_value = _ok_payload(
+        rows=[["PREMIUM_SQL", "SQL", "100.0", "5", "DBU"]],
+        cols=["sku_name", "billing_origin_product", "total_units", "record_count", "unit"],
+    )
+    r = await sql_tools.billing_summary(since_days=7)
+    assert r["rate_card_applied"] is True
+    assert r["total_usd"] == 55.0
+    assert r["summary"][0]["cost_usd"] == 55.0
+
+
+@pytest.mark.asyncio
+async def test_billing_summary_rate_card_wildcard_fallback(mock_execute_sql_safe, monkeypatch):
+    """`*` wildcard prices any SKU not explicitly listed."""
+    monkeypatch.setenv("MCP_DBU_RATE_CARD", '{"PREMIUM_SQL": 0.55, "*": 0.10}')
+    mock_execute_sql_safe.return_value = _ok_payload(
+        rows=[
+            ["PREMIUM_SQL", "SQL", "100.0", "5", "DBU"],
+            ["UNKNOWN_SKU", "X", "200.0", "5", "DBU"],
+        ],
+        cols=["sku_name", "billing_origin_product", "total_units", "record_count", "unit"],
+    )
+    r = await sql_tools.billing_summary(since_days=7)
+    assert r["summary"][0]["cost_usd"] == 55.0     # exact match
+    assert r["summary"][1]["cost_usd"] == 20.0     # 200 * 0.10 via *
+    assert r["total_usd"] == 75.0
+
+
+@pytest.mark.asyncio
+async def test_billing_summary_rate_card_unmatched_sku_is_null(
+    mock_execute_sql_safe, monkeypatch,
+):
+    """A SKU with no exact match and no `*` fallback gets cost_usd=null
+    (so the caller can see *which* row's pricing wasn't known) and is
+    excluded from total_usd."""
+    monkeypatch.setenv("MCP_DBU_RATE_CARD", '{"PREMIUM_SQL": 0.55}')
+    mock_execute_sql_safe.return_value = _ok_payload(
+        rows=[
+            ["PREMIUM_SQL", "SQL", "100.0", "5", "DBU"],
+            ["MYSTERY_SKU", "X", "999.0", "5", "DBU"],
+        ],
+        cols=["sku_name", "billing_origin_product", "total_units", "record_count", "unit"],
+    )
+    r = await sql_tools.billing_summary(since_days=7)
+    assert r["summary"][0]["cost_usd"] == 55.0
+    assert r["summary"][1]["cost_usd"] is None
+    assert r["total_usd"] == 55.0   # mystery row excluded
+
+
+@pytest.mark.asyncio
+async def test_billing_summary_invalid_rate_card_falls_back_silently(
+    mock_execute_sql_safe, monkeypatch,
+):
+    """A malformed rate card must NOT crash the tool. Behavior matches
+    'no rate card set' — DBU-only output. Safer than failing closed
+    when the env var is operator-misconfigured."""
+    monkeypatch.setenv("MCP_DBU_RATE_CARD", "{not-valid-json")
+    mock_execute_sql_safe.return_value = _ok_payload(
+        rows=[["PREMIUM_SQL", "SQL", "100.0", "5", "DBU"]],
+        cols=["sku_name", "billing_origin_product", "total_units", "record_count", "unit"],
+    )
+    r = await sql_tools.billing_summary(since_days=7)
+    assert "rate_card_applied" not in r
+    assert "cost_usd" not in r["summary"][0]
+
+
+@pytest.mark.asyncio
+async def test_billing_summary_rate_card_handles_string_total_units(
+    mock_execute_sql_safe, monkeypatch,
+):
+    """Databricks' Decimal columns serialize as JSON strings (real
+    payload shape: '247.221246666666666675'). Dollar-cost math must
+    coerce them, not blow up on str * float."""
+    monkeypatch.setenv("MCP_DBU_RATE_CARD", '{"PREMIUM_SQL": 0.5}')
+    mock_execute_sql_safe.return_value = _ok_payload(
+        rows=[["PREMIUM_SQL", "SQL", "247.221246666666666675", "115", "DBU"]],
+        cols=["sku_name", "billing_origin_product", "total_units", "record_count", "unit"],
+    )
+    r = await sql_tools.billing_summary(since_days=7)
+    assert r["summary"][0]["cost_usd"] == 123.61   # 247.22... * 0.5 → 123.61 rounded
+
+
+@pytest.mark.asyncio
 async def test_system_tools_passthrough_error(mock_execute_sql_safe):
     """If execute_sql_safe returns an error dict, the wrapper passes it
     through unchanged — does not paper over it."""

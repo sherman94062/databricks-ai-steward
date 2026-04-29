@@ -132,6 +132,15 @@ config:
   # Per-tool quota (e.g. "execute_sql_safe=10/60,*=200/60").
   rateLimit: ""
 
+  # Optional DBU → USD rate card for billing_summary. When set, the
+  # tool annotates each row with cost_usd and emits total_usd. JSON
+  # object mapping SKU name → USD per unit, with optional "*" fallback.
+  # Recommended deployment pattern: store as a ConfigMap and inject
+  # via envFrom (so price changes don't require a chart re-install).
+  # Example value:
+  #   '{"PREMIUM_SERVERLESS_SQL_COMPUTE_US_EAST_OHIO": 0.55, "*": 0.30}'
+  dbuRateCard: ""
+
   # OpenTelemetry — leave unset unless you have a collector.
   otelExporterOtlpEndpoint: ""
   otelServiceName: databricks-ai-steward

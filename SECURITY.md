@@ -398,6 +398,7 @@ per-tool sub-credentialing yet.
 | `MCP_TRUST_END_USER_HEADER` | If `1`, trust an upstream-proxy-set header naming the authenticated end-user as the per-request `caller_id` (overrides `MCP_BEARER_TOKEN_NAME`). The proxy MUST strip any client-supplied value of that header. | unset |
 | `MCP_END_USER_HEADER` | Header name to read end-user identity from when `MCP_TRUST_END_USER_HEADER=1`. Common values: `X-Forwarded-User` (oauth2-proxy), `X-Auth-Request-Email`. | `X-End-User` |
 | `MCP_RATE_LIMIT` | Per-tool overrides, e.g. `execute_sql_safe=10/60,*=200/60`. Each entry is `tool=count/window_seconds`; `*` matches any tool not explicitly listed. | (defaults applied) |
+| `MCP_DBU_RATE_CARD` | JSON object mapping SKU name → USD/unit. Optional `"*"` key sets a fallback rate. When set, `billing_summary` annotates each row with `cost_usd` and adds a top-level `total_usd`. Malformed JSON falls back silently to DBU-only output. | unset |
 
 ## k8s integration
 

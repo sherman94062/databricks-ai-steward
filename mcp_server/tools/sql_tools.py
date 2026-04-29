@@ -23,6 +23,7 @@ Databricks. Its contract:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from typing import Any
@@ -432,6 +433,59 @@ async def recent_query_history(
     }
 
 
+def _load_rate_card() -> dict[str, float]:
+    """Parse MCP_DBU_RATE_CARD: a JSON object mapping SKU name to
+    USD-per-unit. Wildcard `*` matches any SKU not explicitly listed.
+    Returns {} when unset, malformed, or wrong shape — `billing_summary`
+    silently falls back to DBU-only output rather than crashing on a
+    bad config."""
+    raw = os.environ.get("MCP_DBU_RATE_CARD", "").strip()
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    out: dict[str, float] = {}
+    for k, v in parsed.items():
+        if isinstance(k, str) and isinstance(v, (int, float)) and not isinstance(v, bool):
+            out[k] = float(v)
+    return out
+
+
+def _annotate_with_cost(
+    rows: list[dict], rate_card: dict[str, float],
+) -> tuple[list[dict], float | None]:
+    """Add `cost_usd` to each row using the rate card. SKU lookup falls
+    back to `*` when a row's SKU isn't explicitly priced. Rows without
+    a matching rate get `cost_usd: null`. Returns (annotated_rows,
+    total_usd) — total is None if no row matched any rate."""
+    if not rate_card:
+        return rows, None
+    annotated = []
+    total = 0.0
+    matched_any = False
+    for row in rows:
+        sku = row.get("sku_name") or ""
+        rate = rate_card.get(sku, rate_card.get("*"))
+        new_row = dict(row)
+        if rate is None:
+            new_row["cost_usd"] = None
+        else:
+            try:
+                units = float(row.get("total_units", 0))
+                cost = round(units * rate, 2)
+                new_row["cost_usd"] = cost
+                total += cost
+                matched_any = True
+            except (TypeError, ValueError):
+                new_row["cost_usd"] = None
+        annotated.append(new_row)
+    return annotated, round(total, 2) if matched_any else None
+
+
 @safe_tool(timeout_s=60)
 async def billing_summary(since_days: int = 7) -> dict:
     """Aggregate DBU consumption from `system.billing.usage`, grouped by
@@ -439,6 +493,13 @@ async def billing_summary(since_days: int = 7) -> dict:
 
     Args:
         since_days: lookback window in days. Clamped to [1, 90].
+
+    When `MCP_DBU_RATE_CARD` is set (a JSON object mapping SKU name to
+    USD-per-unit, optionally with `"*"` as a fallback rate), each row
+    in the response carries an additional `cost_usd` field and the
+    response includes a top-level `total_usd`. Without the rate card,
+    the response is DBU-only (today's default) — translating DBUs to
+    dollars then becomes the caller's job.
     """
     d = _coerce_int(since_days, "since_days", 1, 90)
     # nosec B608 — d is int-validated by _coerce_int.
@@ -455,9 +516,18 @@ async def billing_summary(since_days: int = 7) -> dict:
     raw = await execute_sql_safe(sql, row_limit=200)
     if "error" in raw:
         return raw
-    return {
-        "summary": _rows_to_dicts(raw),
+
+    rows = _rows_to_dicts(raw)
+    rate_card = _load_rate_card()
+    rows, total_usd = _annotate_with_cost(rows, rate_card)
+
+    result: dict = {
+        "summary": rows,
         "since_days": d,
         "row_count": raw["row_count"],
         "truncated": raw["truncated"],
     }
+    if rate_card:
+        result["rate_card_applied"] = True
+        result["total_usd"] = total_usd
+    return result

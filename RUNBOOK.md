@@ -201,6 +201,7 @@ service-principal PAT.
 | `MCP_TRUST_END_USER_HEADER` | If `1`, read per-end-user identity from a trusted upstream-proxy header (overrides `MCP_BEARER_TOKEN_NAME`). See "Per-end-user attribution" below. | unset |
 | `MCP_END_USER_HEADER` | Header name to read end-user identity from when `MCP_TRUST_END_USER_HEADER=1` | `X-End-User` |
 | `MCP_RATE_LIMIT` | Per-tool quota overrides, e.g. `execute_sql_safe=10/60,*=200/60` | defaults |
+| `MCP_DBU_RATE_CARD` | JSON object mapping SKU name → USD/unit (with optional `"*"` fallback). When set, `billing_summary` adds `cost_usd` per row + `total_usd`. | unset |
 | `MCP_TOOL_TIMEOUT_S` | Outer per-tool timeout via `_guard` | `30` |
 | `MCP_SQL_WAIT_TIMEOUT_S` | Databricks Statement-Execution `wait_timeout` | `25` |
 | `MCP_SQL_ROW_LIMIT` / `MCP_SQL_HARD_ROW_LIMIT` | Default and hard cap for SQL row limit | `100` / `1000` |
