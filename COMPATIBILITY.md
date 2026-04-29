@@ -20,7 +20,7 @@ server, on which transport, and what worked. Keep this honest:
 | langchain-mcp-adapters | streamable-http | 2026-04-26 | ✓ | ✓ | Same probe |
 | Goose (Block) CLI 1.32.0 | stdio | 2026-04-26 | ✓ | partial | Extension loaded cleanly, session ran with our server registered. Tool invocation via LLM not run end-to-end (would require fresh keychain auth grant + Anthropic credits). See "Goose recipe" below. |
 | Claude Desktop (macOS) | stdio | 2026-04-26 | ✓ | ✓ | Verified end-to-end after relaunch. Config in `~/Library/Application Support/Claude/claude_desktop_config.json`. |
-| Cursor (macOS) | stdio | 2026-04-26 | ✓ | ✓ | Verified end-to-end: Composer agent called `list_catalogs` via MCP and returned the expected stub. Config in this repo's `.cursor/mcp.json` (gitignored). |
+| Cursor (macOS) | stdio | 2026-04-26 | ✓ | ✓ | Verified end-to-end: Composer agent called `list_catalogs` via MCP and received live Unity Catalog data. Config in this repo's `.cursor/mcp.json` (gitignored). |
 
 The MCP Inspector pass is the strongest single signal — it is the
 reference debugging tool from the MCP team and exercises the spec
@@ -212,7 +212,8 @@ keychain or env).
 3. Verify three things at minimum:
    - server appears in the client's tool list with `health` and
      `list_catalogs` visible
-   - `list_catalogs` returns the stub payload
+   - `list_catalogs` returns live Unity Catalog data shaped like
+     `{"catalogs": [{"name", "type", "comment"}, ...]}`
    - `health` reports `ready=true`
 4. Add a row to the **Tested** table above with the date and any quirks.
 5. If the client adds new compat surface (e.g. cancellation, sampling,
