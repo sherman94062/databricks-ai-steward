@@ -360,6 +360,30 @@ docker stop jaeger
 
 ---
 
+## Phase 8.5 — MCP Prompts (CFO-readable billing)
+
+The server exposes one Prompt today: `billing_report`. Prompts are
+user-initiated templates (vs. Tools, which the LLM calls) — pick one
+in the client UI, fill in the args, and the rendered template
+becomes the prompt the LLM sees.
+
+In Claude Code, type `/` and you should see `billing_report` in the
+prompt picker. Pick it, enter `weeks_back: 1`, and the LLM
+will call `billing_summary` (twice, for current + prior period),
+translate DBU/DSU/SKU output to dollars + plain English, and emit a
+report under 200 words formatted for leadership.
+
+In MCP Inspector, switch to the **Prompts** tab. `billing_report`
+should appear with a `weeks_back` argument. Click "Get Prompt" — the
+template returns instructions to the LLM (not the report itself; the
+LLM still has to do the work via tool calls).
+
+The prompt only renders well end-to-end when `MCP_DBU_RATE_CARD` is
+configured (see Phase 8). Without it, the LLM will note that prices
+weren't configured rather than guessing.
+
+---
+
 ## Phase 9 — Containerized + helm
 
 ### Docker Compose (single-host)

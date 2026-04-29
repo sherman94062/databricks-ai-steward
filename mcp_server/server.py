@@ -23,6 +23,7 @@ import sys
 
 from dotenv import load_dotenv
 
+from mcp_server import prompts  # noqa: F401 — imported for side-effect of registering prompts
 from mcp_server.app import log, mcp
 from mcp_server.lifecycle import run_with_lifecycle
 from mcp_server.tools import (  # noqa: F401 — imported for side-effect of registering tools

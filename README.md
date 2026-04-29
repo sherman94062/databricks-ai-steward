@@ -225,7 +225,7 @@ python -m stress.probe_d_blast_radius    # sync-tool blast radius
 
 | Path | Purpose |
 |---|---|
-| `mcp_server/` | The MCP server itself: `app.py` (FastMCP instance + guards), `server.py` (entry point), `tools/`, `audit_verify.py` |
+| `mcp_server/` | The MCP server itself: `app.py` (FastMCP instance + guards), `server.py` (entry point), `tools/`, `prompts.py`, `audit_verify.py` |
 | `deploy/` | Helm chart (`helm/databricks-ai-steward/`) + `docker-compose.yml` |
 | `stress/` | Load harness, fault-injection harness, cancellation/lifecycle probes |
 | `tests/` | Unit tests for the reliability guards |
