@@ -531,3 +531,99 @@ async def billing_summary(since_days: int = 7) -> dict:
         result["rate_card_applied"] = True
         result["total_usd"] = total_usd
     return result
+
+
+def _friendly_sku_label(sku_name: str, billing_origin_product: str) -> str:
+    """Translate a Databricks SKU + billing-origin-product pair to a
+    non-technical label. Falls back to the raw SKU when no rule matches
+    so the consumer can still display *something* recognizable."""
+    bop = (billing_origin_product or "").upper()
+    sku = (sku_name or "").upper()
+    if bop == "PREDICTIVE_OPTIMIZATION":
+        return "Background table optimization"
+    if "STORAGE" in bop or "STORAGE" in sku:
+        return "Data storage"
+    if bop == "SQL" or "SQL_COMPUTE" in sku:
+        return "Interactive SQL queries"
+    if "JOBS" in sku and "COMPUTE" in sku:
+        return "Scheduled jobs"
+    return sku_name
+
+
+@safe_tool(timeout_s=60)
+async def billing_report(weeks_back: int = 1) -> dict:
+    """Stakeholder-friendly Databricks spend report combining
+    current-period spend, period-over-period delta, and projected
+    monthly run rate. Pre-computes everything a non-technical
+    audience needs so the LLM (or any consumer) just formats.
+
+    Calls `billing_summary` twice — once for the current window and
+    once for a window covering twice the duration, so the prior
+    comparable period is the difference. Each summary row is
+    annotated with `friendly_label` (e.g. "Interactive SQL queries"
+    instead of `PREMIUM_SERVERLESS_SQL_COMPUTE_US_EAST_OHIO`).
+
+    When `MCP_DBU_RATE_CARD` is configured, returns dollar amounts
+    (`current_period_total_usd`, `prior_period_total_usd`,
+    `delta_usd`, `delta_percent`,
+    `projected_monthly_run_rate_usd`). Without the rate card, returns
+    DBU-level summary data with a `warning` field — never guesses at
+    prices.
+
+    Args:
+        weeks_back: Number of weeks the report covers. Clamped to [1, 12].
+    """
+    weeks = _coerce_int(weeks_back, "weeks_back", 1, 12)
+    days = weeks * 7
+    wider_days = weeks * 14
+
+    current = await billing_summary(since_days=days)
+    if "error" in current:
+        return current
+    wider = await billing_summary(since_days=wider_days)
+    if "error" in wider:
+        return wider
+
+    rate_card_applied = bool(current.get("rate_card_applied", False))
+
+    summary = []
+    for row in current.get("summary", []):
+        annotated = dict(row)
+        annotated["friendly_label"] = _friendly_sku_label(
+            row.get("sku_name", ""),
+            row.get("billing_origin_product", ""),
+        )
+        summary.append(annotated)
+
+    result: dict = {
+        "weeks_back": weeks,
+        "current_period_days": days,
+        "summary": summary,
+        "rate_card_applied": rate_card_applied,
+    }
+
+    if rate_card_applied:
+        current_total = float(current.get("total_usd") or 0)
+        wider_total = float(wider.get("total_usd") or 0)
+        prior_total = round(wider_total - current_total, 2)
+        delta_usd = round(current_total - prior_total, 2)
+        delta_pct: float | None = (
+            round((delta_usd / prior_total) * 100, 1) if prior_total else None
+        )
+        projected_monthly = round((current_total / max(days, 1)) * 30, 2)
+
+        result["currency"] = "USD"
+        result["current_period_total_usd"] = round(current_total, 2)
+        result["prior_period_total_usd"] = prior_total
+        result["delta_usd"] = delta_usd
+        result["delta_percent"] = delta_pct
+        result["projected_monthly_run_rate_usd"] = projected_monthly
+    else:
+        result["warning"] = (
+            "MCP_DBU_RATE_CARD not configured. Period-over-period "
+            "comparison and monthly run-rate projections in dollars "
+            "are not available. Set the env var to enable dollar-denominated "
+            "fields; current response carries DBU/DSU totals only."
+        )
+
+    return result

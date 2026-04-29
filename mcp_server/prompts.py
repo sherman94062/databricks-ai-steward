@@ -37,8 +37,6 @@ def billing_report(weeks_back: int = 1) -> str:
     Args:
         weeks_back: Number of weeks to cover. Defaults to 1.
     """
-    days = weeks_back * 7
-    prior_window_days = weeks_back * 14
     return f"""You are generating a Databricks spend report for non-technical
 leadership (CFO, CTO, business stakeholders). They do not speak DBU,
 DSU, SKU, or "billing_origin_product." Translate everything to
@@ -46,21 +44,19 @@ dollars and plain English.
 
 Steps:
 
-1. Call `billing_summary` with `since_days={days}` to get the
-   current-period spend. If the response includes `total_usd` and
-   `cost_usd` per row, use those directly. If those fields are
-   missing, the operator hasn't configured `MCP_DBU_RATE_CARD` —
-   say so explicitly in the report rather than guessing at prices.
+1. Call the `billing_report` tool with `weeks_back={weeks_back}`. The
+   tool pre-computes everything you need:
+     - `current_period_total_usd` — total spend for the requested window
+     - `prior_period_total_usd` — same-length prior window for comparison
+     - `delta_usd`, `delta_percent` — current vs prior
+     - `projected_monthly_run_rate_usd` — extrapolated 30-day run rate
+     - `summary[]` — per-line breakdown, each with a `friendly_label`
+       field carrying the plain-English name (use this, NOT `sku_name`)
+   When `rate_card_applied` is `false`, dollar fields are absent and
+   a `warning` field explains why. Pass that warning through to the
+   report rather than guessing prices.
 
-2. Call `billing_summary` again with `since_days={prior_window_days}`
-   to get a window that includes the prior comparable period.
-   Subtract the current-period totals from the wider window to
-   isolate the prior {weeks_back} week(s).
-
-3. Compute the projected monthly run rate by extrapolating the
-   current-period total to 30 days.
-
-4. Format the report exactly as:
+2. Format the report exactly as:
 
    **Databricks spend — last {weeks_back} week(s)**
 
@@ -68,22 +64,13 @@ Steps:
    - **vs prior {weeks_back} week(s)**: +$X.XX (+X%) or -$X.XX (-X%)
    - **Projected monthly run rate**: $X.XX
 
-   **Top cost drivers**:
-   - <plain-language label>: $X.XX (X% of total)
-   - <plain-language label>: $X.XX (X% of total)
-   - <plain-language label>: $X.XX (X% of total)
+   **Top cost drivers** (descending by `cost_usd`):
+   - {{friendly_label}}: $X.XX (X% of total)
+   - {{friendly_label}}: $X.XX (X% of total)
+   - {{friendly_label}}: $X.XX (X% of total)
 
-   Use these plain-language labels for common SKUs:
-   - SKU containing `SQL_COMPUTE` → "Interactive SQL queries"
-   - SKU containing `JOBS_*_COMPUTE` → "Scheduled jobs"
-   - SKU containing `STORAGE` → "Data storage"
-   - SKU containing `PREDICTIVE_OPTIMIZATION` → "Background table optimization"
-   - For anything else, derive a reasonable plain-English name and
-     flag it in a footnote.
+   **Notes**: any caveats — rate-card not configured, partial data, etc.
 
-   **Notes**:
-   - Any caveats: rate-card SKUs not configured, partial data, etc.
-
-5. Keep the report under 200 words. No SKU codes in the body —
-   they belong only in a footnote if a row's pricing was unknown.
+3. Keep the report under 200 words. No SKU codes in the body — only
+   in a footnote if a row's pricing was unknown.
 """

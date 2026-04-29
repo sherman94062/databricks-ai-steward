@@ -208,6 +208,134 @@ async def test_billing_summary_rate_card_handles_string_total_units(
 
 
 @pytest.mark.asyncio
+async def test_billing_report_with_rate_card_returns_dollar_analysis(
+    mock_execute_sql_safe, monkeypatch,
+):
+    """billing_report calls billing_summary twice — current window and
+    a window covering twice the duration, so the prior comparable
+    period is the difference. This verifies the dollar-mode analysis
+    path: deltas, projections, friendly labels."""
+    monkeypatch.setenv("MCP_DBU_RATE_CARD", '{"PREMIUM_SQL": 1.0}')
+
+    # Two payloads queued: first call is the current 7-day window
+    # ($100), second is the wider 14-day window ($150 → prior=$50).
+    payloads = [
+        _ok_payload(
+            rows=[["PREMIUM_SQL", "SQL", "100.0", "5", "DBU"]],
+            cols=["sku_name", "billing_origin_product", "total_units",
+                  "record_count", "unit"],
+        ),
+        _ok_payload(
+            rows=[["PREMIUM_SQL", "SQL", "150.0", "10", "DBU"]],
+            cols=["sku_name", "billing_origin_product", "total_units",
+                  "record_count", "unit"],
+        ),
+    ]
+    mock_execute_sql_safe.side_effect = payloads
+
+    r = await sql_tools.billing_report(weeks_back=1)
+
+    assert r["rate_card_applied"] is True
+    assert r["currency"] == "USD"
+    assert r["current_period_total_usd"] == 100.0
+    assert r["prior_period_total_usd"] == 50.0
+    assert r["delta_usd"] == 50.0
+    assert r["delta_percent"] == 100.0
+    assert r["projected_monthly_run_rate_usd"] == 428.57   # 100/7*30
+    # Friendly label was added.
+    assert r["summary"][0]["friendly_label"] == "Interactive SQL queries"
+    assert r["summary"][0]["sku_name"] == "PREMIUM_SQL"   # raw SKU preserved
+
+
+@pytest.mark.asyncio
+async def test_billing_report_without_rate_card_returns_warning(
+    mock_execute_sql_safe, monkeypatch,
+):
+    """Without MCP_DBU_RATE_CARD, dollar fields are omitted and a
+    warning is included. The tool must NOT fabricate prices."""
+    monkeypatch.delenv("MCP_DBU_RATE_CARD", raising=False)
+    payload = _ok_payload(
+        rows=[["PREMIUM_SQL", "SQL", "100.0", "5", "DBU"]],
+        cols=["sku_name", "billing_origin_product", "total_units",
+              "record_count", "unit"],
+    )
+    mock_execute_sql_safe.side_effect = [payload, payload]
+
+    r = await sql_tools.billing_report(weeks_back=1)
+
+    assert r["rate_card_applied"] is False
+    assert "warning" in r
+    assert "MCP_DBU_RATE_CARD" in r["warning"]
+    # Dollar fields must not appear when prices aren't configured.
+    assert "delta_usd" not in r
+    assert "current_period_total_usd" not in r
+    assert "projected_monthly_run_rate_usd" not in r
+    # But the underlying summary is still there for any caller that
+    # wants to display DBU-level data.
+    assert r["summary"][0]["friendly_label"] == "Interactive SQL queries"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "sku, bop, expected",
+    [
+        ("PREMIUM_SERVERLESS_SQL_COMPUTE_US_EAST_OHIO", "SQL",
+         "Interactive SQL queries"),
+        ("PREMIUM_DATABRICKS_STORAGE_US_EAST_OHIO", "DEFAULT_STORAGE",
+         "Data storage"),
+        ("PREMIUM_JOBS_SERVERLESS_COMPUTE_US_EAST_OHIO",
+         "PREDICTIVE_OPTIMIZATION", "Background table optimization"),
+        ("PREMIUM_JOBS_SERVERLESS_COMPUTE_US_EAST_OHIO", "JOBS",
+         "Scheduled jobs"),
+        ("WHATEVER_NEW_SKU", "FUTURE_PRODUCT", "WHATEVER_NEW_SKU"),
+    ],
+)
+async def test_billing_report_friendly_labels(
+    mock_execute_sql_safe, monkeypatch, sku, bop, expected,
+):
+    """The plain-English label rules cover the SKU shapes we've seen
+    in real workspaces. Anything unrecognized falls back to the raw
+    SKU so the consumer sees *something* rather than null."""
+    monkeypatch.setenv("MCP_DBU_RATE_CARD", '{"*": 1.0}')
+    payload = _ok_payload(
+        rows=[[sku, bop, "10.0", "1", "DBU"]],
+        cols=["sku_name", "billing_origin_product", "total_units",
+              "record_count", "unit"],
+    )
+    mock_execute_sql_safe.side_effect = [payload, payload]
+    r = await sql_tools.billing_report(weeks_back=1)
+    assert r["summary"][0]["friendly_label"] == expected
+
+
+@pytest.mark.asyncio
+async def test_billing_report_clamps_weeks_back(mock_execute_sql_safe, monkeypatch):
+    """weeks_back=999 should clamp to 12, not generate a 7000-day SQL
+    query that the workspace will reject."""
+    monkeypatch.delenv("MCP_DBU_RATE_CARD", raising=False)
+    payload = _ok_payload(rows=[], cols=["sku_name"])
+    mock_execute_sql_safe.side_effect = [payload, payload]
+    r = await sql_tools.billing_report(weeks_back=999)
+    assert r["weeks_back"] == 12
+    assert r["current_period_days"] == 84   # 12 * 7
+
+
+@pytest.mark.asyncio
+async def test_billing_report_passthrough_error(mock_execute_sql_safe, monkeypatch):
+    """If the inner billing_summary call returns an error dict,
+    billing_report passes it through unchanged. Doesn't paper over."""
+    monkeypatch.delenv("MCP_DBU_RATE_CARD", raising=False)
+    mock_execute_sql_safe.side_effect = [
+        {"error": {"type": "PermissionDenied",
+                   "message": "no SELECT on system.billing.usage"}},
+    ]
+    r = await sql_tools.billing_report(weeks_back=1)
+    assert r == {
+        "error": {"type": "PermissionDenied",
+                  "message": "no SELECT on system.billing.usage"}
+    }
+
+
+@pytest.mark.asyncio
 async def test_system_tools_passthrough_error(mock_execute_sql_safe):
     """If execute_sql_safe returns an error dict, the wrapper passes it
     through unchanged — does not paper over it."""

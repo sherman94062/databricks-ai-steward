@@ -139,7 +139,8 @@ or sidecar). Verified by [`stress/probe_http_auth.py`](stress/probe_http_auth.py
 | `list_system_tables` | live | Enumerate readable tables in the `system` catalog via `system.information_schema.tables` |
 | `recent_audit_events` | live (warehouse-bound) | Recent rows from `system.access.audit`. May time out on small warehouses with high event volume — see tool docstring |
 | `recent_query_history` | live | Recent rows from `system.query.history` |
-| `billing_summary` | live | DBU consumption from `system.billing.usage`, grouped by SKU |
+| `billing_summary` | live | DBU consumption from `system.billing.usage`, grouped by SKU. With `MCP_DBU_RATE_CARD`, adds `cost_usd` per row + `total_usd` |
+| `billing_report` | live | Stakeholder-friendly spend report: current + prior period + delta + monthly run-rate projection, plain-English labels |
 | `list_tables` | planned | Thin wrapper over `execute_sql_safe` (`SHOW TABLES IN ...`) |
 | `describe_table` | planned | Thin wrapper over `execute_sql_safe` (`DESCRIBE EXTENDED ...`) |
 | `sample_table` | planned | Thin wrapper over `execute_sql_safe` (bounded `SELECT *`) |

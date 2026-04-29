@@ -34,31 +34,32 @@ async def test_billing_report_prompt_is_registered():
 @pytest.mark.asyncio
 async def test_billing_report_default_window_is_one_week():
     rendered = prompts.billing_report()
-    assert "since_days=7" in rendered
-    # Prior comparable period: 2 weeks back so the LLM can isolate
-    # the prior 1 week by subtraction.
-    assert "since_days=14" in rendered
+    assert "weeks_back=1" in rendered
 
 
 @pytest.mark.asyncio
 async def test_billing_report_custom_window_propagates():
     rendered = prompts.billing_report(weeks_back=4)
-    assert "since_days=28" in rendered
-    assert "since_days=56" in rendered  # prior comparable period
+    assert "weeks_back=4" in rendered
 
 
-def test_billing_report_references_billing_summary_tool():
-    """The prompt orchestrates by name. If `billing_summary` is ever
-    renamed, this test breaks before we ship a silently-broken
-    prompt."""
+def test_billing_report_references_billing_report_tool():
+    """The prompt orchestrates by tool name. If `billing_report` (the
+    tool) is ever renamed, this test breaks before we ship a
+    silently-broken prompt."""
     rendered = prompts.billing_report(weeks_back=1)
-    assert "billing_summary" in rendered
+    assert "billing_report" in rendered
 
 
 def test_billing_report_template_avoids_jargon_in_output_format():
-    """The whole point of the prompt is translation — output format
-    must instruct plain-English labels for common SKUs."""
+    """Plain-English label translation now lives in the
+    `billing_report` tool (`_friendly_sku_label`) — the prompt's job
+    is to tell the LLM to *use* the tool's friendly_label field
+    instead of the raw sku_name. Verify the contract."""
     rendered = prompts.billing_report(weeks_back=1)
-    assert "Interactive SQL queries" in rendered
-    assert "Data storage" in rendered
-    assert "Background table optimization" in rendered
+    assert "friendly_label" in rendered
+    # Output format should reference friendly_label, not sku_name,
+    # as the body label.
+    assert "{friendly_label}" in rendered
+    # No SKU codes in the body of the report.
+    assert "SKU codes in the body" in rendered or "No SKU" in rendered

@@ -360,27 +360,39 @@ docker stop jaeger
 
 ---
 
-## Phase 8.5 — MCP Prompts (CFO-readable billing)
+## Phase 8.5 — CFO-readable billing (Tool + Prompt)
 
-The server exposes one Prompt today: `billing_report`. Prompts are
-user-initiated templates (vs. Tools, which the LLM calls) — pick one
-in the client UI, fill in the args, and the rendered template
-becomes the prompt the LLM sees.
+The same `billing_report` capability is exposed two ways for
+broadest client compatibility:
 
-In Claude Code, type `/` and you should see `billing_report` in the
-prompt picker. Pick it, enter `weeks_back: 1`, and the LLM
-will call `billing_summary` (twice, for current + prior period),
-translate DBU/DSU/SKU output to dollars + plain English, and emit a
-report under 200 words formatted for leadership.
+- as a **Tool** (`billing_report`) — universally callable. Every MCP
+  client (Claude Code, Claude Desktop, claude.ai, Cursor, MCP
+  Inspector) sees it. The tool calls `billing_summary` twice
+  internally (current + wider window), computes the period-over-period
+  delta, projects the monthly run rate, and annotates each row with a
+  plain-English `friendly_label` (e.g. "Interactive SQL queries"
+  instead of `PREMIUM_SERVERLESS_SQL_COMPUTE_US_EAST_OHIO`).
+- as a **Prompt** (`billing_report`) — user-invoked slash-command
+  template. Surfaces in clients that support MCP Prompts (Claude
+  Code's `/` menu); not all clients do, which is why the Tool exists.
 
-In MCP Inspector, switch to the **Prompts** tab. `billing_report`
-should appear with a `weeks_back` argument. Click "Get Prompt" — the
-template returns instructions to the LLM (not the report itself; the
-LLM still has to do the work via tool calls).
+**To call as a Tool from any client:**
 
-The prompt only renders well end-to-end when `MCP_DBU_RATE_CARD` is
-configured (see Phase 8). Without it, the LLM will note that prices
-weren't configured rather than guessing.
+> "Use the steward's `billing_report` tool with `weeks_back=1`."
+
+The tool returns structured data; the LLM formats the report.
+
+**To use as a Prompt (Claude Code only):** type `/billing_report`,
+accept the default `weeks_back: 1`, send. The LLM follows the
+template and produces a sub-200-word leadership-friendly report.
+
+**MCP Inspector path:** switch to the **Prompts** tab to *preview*
+the rendered template (it doesn't execute — Inspector has no LLM).
+For execution, use a real MCP client.
+
+Both paths return dollar amounts when `MCP_DBU_RATE_CARD` is
+configured (see Phase 8); without the rate card, output is DBU-level
+with an explicit warning rather than guessed prices.
 
 ---
 
