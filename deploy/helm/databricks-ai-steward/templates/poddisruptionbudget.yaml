@@ -1,0 +1,13 @@
+{{- if .Values.podDisruptionBudget.enabled -}}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "databricks-ai-steward.fullname" . }}
+  labels:
+    {{- include "databricks-ai-steward.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "databricks-ai-steward.selectorLabels" . | nindent 6 }}
+{{- end }}

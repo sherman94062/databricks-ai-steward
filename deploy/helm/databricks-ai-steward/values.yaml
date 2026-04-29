@@ -1,0 +1,226 @@
+# Default values for databricks-ai-steward.
+# Override with `helm install ... -f my-values.yaml` or `--set key=value`.
+
+replicaCount: 2
+
+image:
+  repository: ghcr.io/sherman94062/databricks-ai-steward
+  # Defaults to .Chart.AppVersion if empty.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+podLabels: {}
+
+# fsGroup matches the non-root user baked into the runtime image
+# (Dockerfile creates a `steward` user). The audit log directory is
+# group-writable so the application can write to a mounted volume
+# that's owned by root in the volume mount.
+podSecurityContext:
+  fsGroup: 65532
+  runAsNonRoot: true
+  runAsUser: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 65532
+
+service:
+  type: ClusterIP
+  port: 8765
+
+# The chart defaults `ingress.enabled: false` — most fintechs front
+# the service with their own gateway / oauth2-proxy / istio. The
+# annotations below are an example for nginx + oauth2-proxy showing
+# how to wire X-Forwarded-User so MCP_TRUST_END_USER_HEADER works.
+ingress:
+  enabled: false
+  className: nginx
+  annotations: {}
+    # nginx.ingress.kubernetes.io/auth-url: "http://oauth2-proxy.auth.svc.cluster.local/oauth2/auth"
+    # nginx.ingress.kubernetes.io/auth-signin: "https://login.example.com/oauth2/start?rd=$escaped_request_uri"
+    # nginx.ingress.kubernetes.io/auth-response-headers: "X-Auth-Request-Email,X-Auth-Request-User"
+    # nginx.ingress.kubernetes.io/configuration-snippet: |
+    #   # CRITICAL: clear any client-supplied X-Forwarded-User before the proxy sets it.
+    #   proxy_set_header X-Forwarded-User "";
+    #   proxy_set_header X-Forwarded-User $upstream_http_x_auth_request_user;
+  hosts:
+    - host: steward.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+    # - secretName: steward-tls
+    #   hosts:
+    #     - steward.example.com
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 1000m
+    memory: 512Mi
+
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: http
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  timeoutSeconds: 3
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /readyz
+    port: http
+  initialDelaySeconds: 2
+  periodSeconds: 5
+  timeoutSeconds: 3
+  failureThreshold: 2
+
+# Configuration via env. Every value here corresponds to an env-var
+# documented in SECURITY.md "Configuration reference".
+config:
+  transport: streamable-http
+  host: 0.0.0.0
+  port: 8765
+  allowExternal: "1"
+  logLevel: warning
+  toolTimeoutS: "30"
+  maxResponseBytes: "262144"
+  shutdownGraceS: "5"
+  cleanupTimeoutS: "2"
+  auditLogPath: /var/log/steward/audit.jsonl
+  auditDisableStderr: ""
+  prometheusEnabled: ""
+
+  # Per-end-user identity propagation. Set both when behind a verified
+  # upstream proxy that sets the chosen header.
+  trustEndUserHeader: ""    # set to "1" to enable
+  endUserHeader: ""         # default is X-End-User; set X-Forwarded-User for oauth2-proxy
+
+  # Caller identity defaults — overridden per-request by the bearer
+  # middleware when MCP_BEARER_TOKEN is set.
+  callerId: ""              # MCP_CALLER_ID
+  bearerTokenName: ""       # MCP_BEARER_TOKEN_NAME (e.g. "team-data")
+
+  # Databricks SQL governance.
+  databricksWarehouseId: ""
+  sqlRowLimit: "100"
+  sqlHardRowLimit: "1000"
+  sqlWaitTimeoutS: "25"
+
+  # Per-tool quota (e.g. "execute_sql_safe=10/60,*=200/60").
+  rateLimit: ""
+
+  # OpenTelemetry — leave unset unless you have a collector.
+  otelExporterOtlpEndpoint: ""
+  otelServiceName: databricks-ai-steward
+
+# Workspace credentials. Reference *externally-managed* secrets so the
+# chart never templates raw tokens. Use `kubectl create secret`,
+# external-secrets-operator, or sealed-secrets to provision.
+secrets:
+  # Required. Secret must contain keys named per `keyHost` and `keyToken`.
+  databricks:
+    secretName: databricks-workspace
+    keyHost: host
+    keyToken: token
+
+  # Optional. Secret must contain a single token key.
+  # When set, every HTTP request must carry Authorization: Bearer <token>.
+  bearer:
+    secretName: ""           # e.g. "steward-bearer-token"
+    tokenKey: token
+
+  # Optional. Per-tool credentials override the default Databricks PAT
+  # for specific tools — see SECURITY.md "Configuration reference".
+  perTool: []
+    # - tool: execute_sql_safe
+    #   secretName: steward-tool-token-sql
+    #   tokenKey: token
+    # - tool: list_catalogs
+    #   secretName: steward-tool-token-catalogs
+    #   tokenKey: token
+
+# Audit log volume. emptyDir by default; pair with a log-shipper
+# sidecar (logShipper.enabled below) to land records in immutable
+# storage (S3 + Object Lock recommended). For longer retention switch
+# to type: pvc and provide a pvcName.
+auditVolume:
+  type: emptyDir
+  pvcName: ""
+
+networkPolicy:
+  enabled: true
+  # Egress is restricted to Databricks workspace, DNS, and the OTLP
+  # collector. Leave blank to skip Databricks egress (e.g. dev cluster
+  # without internet).
+  databricks:
+    host: ""                # e.g. "myworkspace.cloud.databricks.com"
+  # Additional ingress sources (e.g. agent-platform namespace).
+  allowFromNamespaces: []
+    # - namespaceSelector:
+    #     matchLabels:
+    #       name: agents
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 80
+
+# Prometheus Operator integration. Requires `MCP_PROMETHEUS_ENABLED=1`
+# (set config.prometheusEnabled to "1") and the prometheus-operator
+# CRDs in-cluster.
+serviceMonitor:
+  enabled: false
+  interval: 30s
+  scrapeTimeout: 10s
+  labels: {}
+
+# Optional log-shipper sidecar. The sidecar tails the audit JSONL file
+# and forwards to S3 / Splunk / Datadog. Defaults off; you provide the
+# image and config. The audit chain is tamper-evident in-app, but
+# immutable storage is what lets you trust archived records.
+logShipper:
+  enabled: false
+  image: ""
+  imagePullPolicy: IfNotPresent
+  args: []
+  env: []
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+topologySpreadConstraints: []

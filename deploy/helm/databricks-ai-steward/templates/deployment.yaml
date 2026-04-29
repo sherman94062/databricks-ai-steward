@@ -1,0 +1,219 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "databricks-ai-steward.fullname" . }}
+  labels:
+    {{- include "databricks-ai-steward.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "databricks-ai-steward.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "databricks-ai-steward.labels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "databricks-ai-steward.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      # Graceful drain: terminationGracePeriodSeconds covers
+      # MCP_SHUTDOWN_GRACE_S + MCP_CLEANUP_TIMEOUT_S + slack.
+      terminationGracePeriodSeconds: 15
+      containers:
+        - name: steward
+          image: {{ include "databricks-ai-steward.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["python", "-m", "mcp_server.server"]
+          args:
+            - "--transport"
+            - {{ .Values.config.transport | quote }}
+            - "--host"
+            - {{ .Values.config.host | quote }}
+            - "--port"
+            - {{ .Values.config.port | quote }}
+            {{- if eq .Values.config.allowExternal "1" }}
+            - "--allow-external"
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.config.port }}
+              protocol: TCP
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          env:
+            - name: MCP_TRANSPORT
+              value: {{ .Values.config.transport | quote }}
+            - name: MCP_HOST
+              value: {{ .Values.config.host | quote }}
+            - name: MCP_PORT
+              value: {{ .Values.config.port | quote }}
+            - name: MCP_ALLOW_EXTERNAL
+              value: {{ .Values.config.allowExternal | quote }}
+            - name: MCP_LOG_LEVEL
+              value: {{ .Values.config.logLevel | quote }}
+            - name: MCP_TOOL_TIMEOUT_S
+              value: {{ .Values.config.toolTimeoutS | quote }}
+            - name: MCP_MAX_RESPONSE_BYTES
+              value: {{ .Values.config.maxResponseBytes | quote }}
+            - name: MCP_SHUTDOWN_GRACE_S
+              value: {{ .Values.config.shutdownGraceS | quote }}
+            - name: MCP_CLEANUP_TIMEOUT_S
+              value: {{ .Values.config.cleanupTimeoutS | quote }}
+            {{- if .Values.config.auditLogPath }}
+            - name: MCP_AUDIT_LOG_PATH
+              value: {{ .Values.config.auditLogPath | quote }}
+            {{- end }}
+            {{- if .Values.config.auditDisableStderr }}
+            - name: MCP_AUDIT_DISABLE_STDERR
+              value: {{ .Values.config.auditDisableStderr | quote }}
+            {{- end }}
+            {{- if .Values.config.prometheusEnabled }}
+            - name: MCP_PROMETHEUS_ENABLED
+              value: {{ .Values.config.prometheusEnabled | quote }}
+            {{- end }}
+            {{- if .Values.config.trustEndUserHeader }}
+            - name: MCP_TRUST_END_USER_HEADER
+              value: {{ .Values.config.trustEndUserHeader | quote }}
+            {{- end }}
+            {{- if .Values.config.endUserHeader }}
+            - name: MCP_END_USER_HEADER
+              value: {{ .Values.config.endUserHeader | quote }}
+            {{- end }}
+            {{- if .Values.config.callerId }}
+            - name: MCP_CALLER_ID
+              value: {{ .Values.config.callerId | quote }}
+            {{- end }}
+            {{- if .Values.config.bearerTokenName }}
+            - name: MCP_BEARER_TOKEN_NAME
+              value: {{ .Values.config.bearerTokenName | quote }}
+            {{- end }}
+            {{- if .Values.config.databricksWarehouseId }}
+            - name: MCP_DATABRICKS_WAREHOUSE_ID
+              value: {{ .Values.config.databricksWarehouseId | quote }}
+            {{- end }}
+            - name: MCP_SQL_ROW_LIMIT
+              value: {{ .Values.config.sqlRowLimit | quote }}
+            - name: MCP_SQL_HARD_ROW_LIMIT
+              value: {{ .Values.config.sqlHardRowLimit | quote }}
+            - name: MCP_SQL_WAIT_TIMEOUT_S
+              value: {{ .Values.config.sqlWaitTimeoutS | quote }}
+            {{- if .Values.config.rateLimit }}
+            - name: MCP_RATE_LIMIT
+              value: {{ .Values.config.rateLimit | quote }}
+            {{- end }}
+            {{- if .Values.config.otelExporterOtlpEndpoint }}
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: {{ .Values.config.otelExporterOtlpEndpoint | quote }}
+            {{- end }}
+            - name: OTEL_SERVICE_NAME
+              value: {{ .Values.config.otelServiceName | quote }}
+
+            # Workspace credentials from external secret refs.
+            - name: DATABRICKS_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.databricks.secretName | quote }}
+                  key: {{ .Values.secrets.databricks.keyHost | quote }}
+            - name: DATABRICKS_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.databricks.secretName | quote }}
+                  key: {{ .Values.secrets.databricks.keyToken | quote }}
+
+            {{- if .Values.secrets.bearer.secretName }}
+            - name: MCP_BEARER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.bearer.secretName | quote }}
+                  key: {{ .Values.secrets.bearer.tokenKey | quote }}
+            {{- end }}
+
+            {{- range .Values.secrets.perTool }}
+            - name: MCP_TOOL_TOKEN_{{ .tool | upper }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .secretName | quote }}
+                  key: {{ .tokenKey | quote }}
+            {{- end }}
+          livenessProbe:
+            {{- toYaml .Values.livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.readinessProbe | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: audit
+              mountPath: /var/log/steward
+            - name: tmp
+              mountPath: /tmp
+        {{- if .Values.logShipper.enabled }}
+        - name: log-shipper
+          image: {{ .Values.logShipper.image | quote }}
+          imagePullPolicy: {{ .Values.logShipper.imagePullPolicy }}
+          {{- with .Values.logShipper.args }}
+          args:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.logShipper.env }}
+          env:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.logShipper.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+          volumeMounts:
+            - name: audit
+              mountPath: /var/log/steward
+              readOnly: true
+        {{- end }}
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+        {{- if eq .Values.auditVolume.type "pvc" }}
+        - name: audit
+          persistentVolumeClaim:
+            claimName: {{ .Values.auditVolume.pvcName | required "auditVolume.pvcName is required when type=pvc" | quote }}
+        {{- else }}
+        - name: audit
+          emptyDir:
+            sizeLimit: 1Gi
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

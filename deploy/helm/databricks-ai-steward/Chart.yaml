@@ -1,0 +1,18 @@
+apiVersion: v2
+name: databricks-ai-steward
+description: Governed MCP server giving AI agents safe, auditable access to Databricks
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - databricks
+  - mcp
+  - model-context-protocol
+  - ai-agents
+  - governance
+home: https://github.com/sherman94062/databricks-ai-steward
+sources:
+  - https://github.com/sherman94062/databricks-ai-steward
+maintainers:
+  - name: Arthur Sherman
+    email: sherman78641@gmail.com

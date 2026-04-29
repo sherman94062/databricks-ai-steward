@@ -1,0 +1,44 @@
+{{ include "databricks-ai-steward.fullname" . }} is installed.
+
+The MCP server speaks `streamable-http` on port {{ .Values.service.port }}
+inside the cluster. Reach it via the cluster service:
+
+    kubectl port-forward -n {{ .Release.Namespace }} svc/{{ include "databricks-ai-steward.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }}
+
+{{- if not .Values.secrets.bearer.secretName }}
+
+⚠ MCP_BEARER_TOKEN is NOT set. Every reachable client can call every
+  tool. Set `secrets.bearer.secretName` to a Secret containing a token
+  before exposing this service outside loopback / cluster-local.
+{{- end }}
+
+{{- if not .Values.networkPolicy.databricks.host }}
+
+⚠ networkPolicy.databricks.host is empty. Egress to Databricks is
+  unrestricted. Set it to the workspace FQDN to scope outbound traffic.
+{{- end }}
+
+{{- if .Values.config.trustEndUserHeader }}
+
+ℹ Per-end-user identity is ENABLED via header {{ .Values.config.endUserHeader | default "X-End-User" | quote }}.
+  The upstream proxy MUST strip any client-supplied value of this header
+  before setting its own. See RUNBOOK.md "Per-end-user attribution".
+{{- end }}
+
+{{- if not .Values.logShipper.enabled }}
+
+ℹ Audit log goes to {{ .Values.config.auditLogPath }} on an emptyDir
+  volume. The chain is tamper-evident in-app — verify with
+  `python -m mcp_server.audit_verify`. For long-term retention enable
+  `logShipper` or switch `auditVolume` to a PVC.
+{{- end }}
+
+Probes:
+    curl http://<pod-ip>:{{ .Values.service.port }}/healthz
+    curl http://<pod-ip>:{{ .Values.service.port }}/readyz
+{{- if eq .Values.config.prometheusEnabled "1" }}
+    curl http://<pod-ip>:{{ .Values.service.port }}/metrics
+{{- end }}
+
+Full operational context: SECURITY.md, RUNBOOK.md, AUDIT_LOG_SCHEMA.md
+in the project root.

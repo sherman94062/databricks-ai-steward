@@ -62,9 +62,22 @@ agent platform) deploys it as an HTTP service behind a reverse proxy
 or ingress. The container ships with `streamable-http` as the default
 transport and binds `0.0.0.0:8765`.
 
-```bash
-docker build -t databricks-ai-steward:dev .
+For Kubernetes, use the helm chart at
+[`deploy/helm/databricks-ai-steward`](deploy/helm/databricks-ai-steward) —
+ships `Deployment`, `Service`, `Ingress`, `NetworkPolicy`, `PDB`,
+`HPA`, `ServiceMonitor`, and an optional log-shipper sidecar. For
+single-host, [`deploy/docker-compose.yml`](deploy/docker-compose.yml)
+brings up the same container with audit volume + healthcheck +
+read-only rootfs.
 
+```bash
+# k8s
+helm install steward ./deploy/helm/databricks-ai-steward \
+  --set secrets.databricks.secretName=dbx-creds \
+  --set secrets.bearer.secretName=steward-bearer
+
+# raw docker
+docker build -t databricks-ai-steward:dev .
 docker run --rm -p 8765:8765 \
   -e DATABRICKS_HOST=https://<workspace>.cloud.databricks.com \
   -e DATABRICKS_TOKEN=dapi... \
@@ -212,7 +225,8 @@ python -m stress.probe_d_blast_radius    # sync-tool blast radius
 
 | Path | Purpose |
 |---|---|
-| `mcp_server/` | The MCP server itself: `app.py` (FastMCP instance + guards), `server.py` (entry point), `tools/` |
+| `mcp_server/` | The MCP server itself: `app.py` (FastMCP instance + guards), `server.py` (entry point), `tools/`, `audit_verify.py` |
+| `deploy/` | Helm chart (`helm/databricks-ai-steward/`) + `docker-compose.yml` |
 | `stress/` | Load harness, fault-injection harness, cancellation/lifecycle probes |
 | `tests/` | Unit tests for the reliability guards |
 | `databricks/`, `governance/`, `agents/`, `examples/` | Empty placeholders for planned subsystems |

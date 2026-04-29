@@ -1,0 +1,63 @@
+{{- if .Values.networkPolicy.enabled -}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "databricks-ai-steward.fullname" . }}
+  labels:
+    {{- include "databricks-ai-steward.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "databricks-ai-steward.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        # Allow from anywhere in the cluster on the service port — the
+        # gateway/ingress narrowing happens at L7 (oauth2-proxy /
+        # bearer auth). Tighten by setting allowFromNamespaces below.
+        {{- if .Values.networkPolicy.allowFromNamespaces }}
+        {{- range .Values.networkPolicy.allowFromNamespaces }}
+        - {{ toYaml . | nindent 10 | trim }}
+        {{- end }}
+        {{- else }}
+        - namespaceSelector: {}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.config.port }}
+  egress:
+    # DNS — required for any other egress to resolve.
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Databricks workspace egress (HTTPS only).
+    {{- if .Values.networkPolicy.databricks.host }}
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 169.254.0.0/16
+      ports:
+        - protocol: TCP
+          port: 443
+    {{- end }}
+    # OTLP collector (in-cluster) — only if config.otelExporterOtlpEndpoint set.
+    {{- if .Values.config.otelExporterOtlpEndpoint }}
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: TCP
+          port: 4317
+        - protocol: TCP
+          port: 4318
+    {{- end }}
+{{- end }}

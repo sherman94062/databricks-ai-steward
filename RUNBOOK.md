@@ -47,51 +47,68 @@ docker run --rm \
 Default container env in the Dockerfile already sets `MCP_TRANSPORT=streamable-http`,
 `MCP_HOST=0.0.0.0`, `MCP_PORT=8765`, and `MCP_ALLOW_EXTERNAL=1`.
 
-### Kubernetes
+### Kubernetes (Helm chart)
 
-```yaml
-apiVersion: apps/v1
-kind: Deployment
-spec:
-  replicas: 2
-  template:
-    spec:
-      containers:
-      - name: mcp
-        image: ghcr.io/<your-org>/databricks-ai-steward:<sha>
-        ports:
-        - containerPort: 8765
-        envFrom:
-        - secretRef: {name: databricks-ai-steward-secrets}
-        livenessProbe:
-          httpGet: {path: /healthz, port: 8765}
-          periodSeconds: 30
-          failureThreshold: 3
-        readinessProbe:
-          httpGet: {path: /readyz, port: 8765}
-          periodSeconds: 5
-        resources:
-          requests: {cpu: 100m, memory: 256Mi}
-          limits:   {cpu:   1, memory:   1Gi}
-        securityContext:
-          runAsNonRoot: true
-          runAsUser:    10001
-          allowPrivilegeEscalation: false
-          readOnlyRootFilesystem: true   # see "Audit log volume" below
-        volumeMounts:
-        - name: audit
-          mountPath: /var/log/databricks-ai-steward
-      volumes:
-      - name: audit
-        persistentVolumeClaim:
-          claimName: databricks-ai-steward-audit
+The chart at [`deploy/helm/databricks-ai-steward`](../deploy/helm/databricks-ai-steward)
+ships every k8s resource the steward needs: `Deployment`, `Service`,
+`Ingress`, `ServiceAccount`, `NetworkPolicy` (egress narrowed to
+Databricks + DNS + OTLP), `PodDisruptionBudget`, `HorizontalPodAutoscaler`,
+`ServiceMonitor` (Prometheus Operator), and an optional log-shipper
+sidecar slot. Probes already wired to `/healthz` + `/readyz`,
+`readOnlyRootFilesystem: true`, non-root user, all caps dropped.
+
+```bash
+# Provision externally-managed secrets (the chart never templates raw tokens).
+kubectl create secret generic dbx-creds \
+  --from-literal=host=https://workspace.cloud.databricks.com \
+  --from-literal=token=dapi...
+kubectl create secret generic steward-bearer \
+  --from-literal=token=$(openssl rand -hex 32)
+
+# Install.
+helm install steward ./deploy/helm/databricks-ai-steward \
+  --set secrets.databricks.secretName=dbx-creds \
+  --set secrets.bearer.secretName=steward-bearer \
+  --set networkPolicy.databricks.host=workspace.cloud.databricks.com \
+  --set config.bearerTokenName=team-data
 ```
 
+The chart's `values.yaml` is annotated; the chart's
+[`README.md`](../deploy/helm/databricks-ai-steward/README.md) walks
+through common overrides (per-end-user identity, per-tool
+credentials, Prometheus + OTLP, log-shipper sidecar). CI runs
+`helm lint` + `helm template` + `kubeconform` against schema on every
+commit.
+
 > **Audit log volume.** With `readOnlyRootFilesystem: true`, the
-> audit log path needs a writable mount. Mount a PVC (or an emptyDir
-> if you don't need durability across pod restarts; the log shipper
-> will have already drained it) at
-> `/var/log/databricks-ai-steward/`.
+> audit log path needs a writable mount. The chart provides one as
+> `emptyDir` by default; set `auditVolume.type: pvc` +
+> `auditVolume.pvcName: <claim>` for durable storage. Either way, the
+> hash chain (see "Audit-log integrity" below) makes the file
+> tamper-evident before the log shipper picks it up.
+
+### Audit-log integrity
+
+Every record carries `seq` + `prev_hash` + `hash`. Verify the live
+file or any rotated archive:
+
+```bash
+python -m mcp_server.audit_verify $MCP_AUDIT_LOG_PATH
+# Exit 0 = chain intact; 1 = mismatch (insert/edit/delete); 2 = file or schema problem
+```
+
+Schedule this as a CronJob alongside the steward Deployment (every
+15 min is a reasonable cadence) and alert on non-zero exit. Schema
+details + tamper-evidence vs forge-resistance trade-off:
+[`AUDIT_LOG_SCHEMA.md`](AUDIT_LOG_SCHEMA.md) "Tamper-evidence
+(in-app)".
+
+### Docker Compose (single-host)
+
+For non-k8s deployments, `deploy/docker-compose.yml` brings up the
+container with audit-volume + healthcheck + read-only rootfs. Bind
+to loopback by default; flip to `0.0.0.0` only after setting
+`MCP_BEARER_TOKEN`.
 
 ### Multi-replica considerations
 
