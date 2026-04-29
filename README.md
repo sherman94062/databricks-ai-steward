@@ -232,6 +232,7 @@ python -m stress.probe_d_blast_radius    # sync-tool blast radius
 | `databricks/`, `governance/`, `agents/`, `examples/` | Empty placeholders for planned subsystems |
 | [`CLAUDE.md`](CLAUDE.md) | Operating notes for Claude Code on this repo |
 | [`WALKTHROUGH.md`](WALKTHROUGH.md) | Setup and tool-authoring guide |
+| [`EXERCISE.md`](EXERCISE.md) | 9-phase hands-on guide that exercises every public surface (also as print-friendly [`docs/EXERCISE.html`](docs/EXERCISE.html)) |
 | [`FLOW.md`](FLOW.md) | How requests move through the system |
 | [`STRESS_FINDINGS.md`](STRESS_FINDINGS.md) | Empirical issues found via the stress harnesses, with reproductions and fixes |
 | [`COMPATIBILITY.md`](COMPATIBILITY.md) | Client/framework compatibility matrix — what's been tested and what's pending |

@@ -1,0 +1,465 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>databricks-ai-steward — Feature Walkthrough</title>
+<style>
+  * { box-sizing: border-box; }
+  html { font-size: 11pt; }
+  body {
+    font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif;
+    color: #111;
+    background: #fff;
+    line-height: 1.5;
+    max-width: 7.5in;
+    margin: 0 auto;
+    padding: 0.6in 0.5in;
+  }
+  h1 {
+    font-size: 22pt;
+    font-weight: 600;
+    margin: 0 0 0.1in 0;
+    letter-spacing: -0.01em;
+  }
+  h1 .sub {
+    display: block;
+    font-size: 11pt;
+    font-weight: 400;
+    color: #555;
+    margin-top: 0.05in;
+    letter-spacing: 0;
+  }
+  h2 {
+    font-size: 15pt;
+    font-weight: 600;
+    margin: 0.4in 0 0.1in 0;
+    padding-top: 0.15in;
+    border-top: 1pt solid #ccc;
+    page-break-before: always;
+    page-break-after: avoid;
+  }
+  h2:first-of-type { page-break-before: auto; }
+  h3 {
+    font-size: 12pt;
+    font-weight: 600;
+    margin: 0.2in 0 0.05in 0;
+    page-break-after: avoid;
+  }
+  p { margin: 0 0 0.1in 0; }
+  ul, ol { margin: 0 0 0.1in 0.3in; }
+  li { margin-bottom: 0.03in; }
+  strong { font-weight: 600; }
+  em { font-style: italic; }
+  code {
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 10pt;
+    background: #f3f3f3;
+    padding: 1pt 3pt;
+    border-radius: 2pt;
+  }
+  pre {
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 9.5pt;
+    background: #f6f6f6;
+    border: 0.5pt solid #ddd;
+    border-left: 2pt solid #666;
+    padding: 0.08in 0.12in;
+    margin: 0.08in 0 0.15in 0;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    line-height: 1.4;
+    page-break-inside: avoid;
+  }
+  pre code {
+    background: transparent;
+    padding: 0;
+    font-size: inherit;
+  }
+  blockquote {
+    margin: 0.1in 0;
+    padding: 0.05in 0.15in;
+    border-left: 2pt solid #999;
+    color: #444;
+    font-style: italic;
+  }
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 0.1in 0 0.15in 0;
+    font-size: 10pt;
+    page-break-inside: avoid;
+  }
+  th, td {
+    border: 0.5pt solid #bbb;
+    padding: 4pt 6pt;
+    text-align: left;
+    vertical-align: top;
+  }
+  th {
+    background: #eee;
+    font-weight: 600;
+  }
+  hr {
+    border: none;
+    border-top: 0.5pt solid #ccc;
+    margin: 0.2in 0;
+  }
+  .meta {
+    color: #555;
+    font-size: 10pt;
+    margin: 0.05in 0 0.3in 0;
+  }
+  .phase-tag {
+    display: inline-block;
+    font-family: ui-monospace, monospace;
+    font-size: 9pt;
+    background: #222;
+    color: #fff;
+    padding: 1pt 6pt;
+    border-radius: 3pt;
+    margin-right: 6pt;
+    vertical-align: middle;
+    letter-spacing: 0.04em;
+  }
+  .callout {
+    background: #f6f4ed;
+    border: 0.5pt solid #d6cfb7;
+    border-left: 2pt solid #a07a4a;
+    padding: 0.08in 0.15in;
+    margin: 0.1in 0;
+    page-break-inside: avoid;
+  }
+  .callout strong { color: #5a4520; }
+
+  @page {
+    size: letter;
+    margin: 0.6in 0.5in 0.7in 0.5in;
+    @bottom-center {
+      content: counter(page) " / " counter(pages);
+      font-family: ui-sans-serif, sans-serif;
+      font-size: 9pt;
+      color: #888;
+    }
+  }
+  @media print {
+    body { padding: 0; max-width: none; }
+    h2 { page-break-before: always; }
+    h2:first-of-type { page-break-before: auto; }
+    pre, table, .callout { page-break-inside: avoid; }
+    a { color: #111; text-decoration: none; }
+  }
+</style>
+</head>
+<body>
+
+<h1>databricks-ai-steward — Feature Walkthrough
+  <span class="sub">A 9-phase guide to exercise every public surface of the project.</span>
+</h1>
+<p class="meta">Run phases top-to-bottom. Each takes 5–15 minutes. Reference docs to keep open while you go: <code>RUNBOOK.md</code>, <code>SECURITY.md</code>, <code>AUDIT_LOG_SCHEMA.md</code>, <code>STRESS_FINDINGS.md</code>.</p>
+
+<h2><span class="phase-tag">PHASE 0</span>One-time setup</h2>
+<pre><code>cd &lt;repo-root&gt;
+source .venv/bin/activate
+pip install -e '.[dev,http]'
+
+# Confirm .env has DATABRICKS_HOST + DATABRICKS_TOKEN
+cat .env | grep -E '^DATABRICKS_' | sed 's/=.*/=&lt;set&gt;/'
+# Should print:
+#   DATABRICKS_HOST=&lt;set&gt;
+#   DATABRICKS_TOKEN=&lt;set&gt;</code></pre>
+
+<h2><span class="phase-tag">PHASE 1</span>Verify the test surface</h2>
+<p><strong>Goal:</strong> confirm the 102-test suite passes locally exactly as CI sees it.</p>
+<pre><code>pytest tests/ -v
+# Expect: 102 passed</code></pre>
+
+<p>Then poke at individual subsystems so you know where each lives:</p>
+<pre><code>pytest tests/test_audit_chain.py -v          # hash chain + verifier
+pytest tests/test_audit_and_rate_limit.py -v # rate limiter + bearer/X-End-User
+pytest tests/test_sql_safety.py -v           # sqlglot governance gate
+pytest tests/test_sql_tools.py -v            # execute_sql_safe end-to-end (mocked workspace)
+pytest tests/test_guards.py -v               # safe_tool guards (timeout, size cap)</code></pre>
+
+<p>Watch the test names — they read as a spec of what each subsystem promises.</p>
+
+<h2><span class="phase-tag">PHASE 2</span>Run the server (stdio) + Claude Code wiring</h2>
+<pre><code># Smoke-start it. It will block waiting for an MCP client on stdin.
+python -m mcp_server.server
+# Press Ctrl-C to kill.</code></pre>
+
+<p>Now register it with Claude Code so you can call the tools from a real client:</p>
+<pre><code>claude mcp add databricks-steward -- python -m mcp_server.server
+claude mcp list</code></pre>
+
+<p>In a Claude Code session, ask it to call the tools — for example:</p>
+<blockquote>"Use the databricks-steward MCP server to call the <code>health</code> tool and show the result."</blockquote>
+<p>Confirm it returns <code>{status, ready, version, uptime_s, in_flight_tasks}</code> and <code>ready: true</code>.</p>
+<blockquote>"List the catalogs in the workspace."</blockquote>
+<p>Confirm <code>list_catalogs</code> returns real Unity Catalog data.</p>
+
+<h2><span class="phase-tag">PHASE 3</span>Exercise the live Databricks tools</h2>
+<p>These all go through <code>execute_sql_safe</code> and the governance gate. Drive them from Claude Code (or directly via the MCP Inspector — <code>npx @modelcontextprotocol/inspector python -m mcp_server.server</code>):</p>
+<pre><code>list_catalogs                    # UC catalog enumeration
+health                           # liveness + drain state
+list_system_tables               # readable tables in `system` catalog
+execute_sql_safe(query="SHOW TABLES IN system.information_schema")
+execute_sql_safe(query="SELECT current_user()")
+recent_query_history(limit=10)
+billing_summary(since_days=7)
+recent_audit_events(limit=5)     # may time out on a 2X-Small warehouse — see RUNBOOK</code></pre>
+
+<p>Now poke at the <strong>governance gate</strong> — these should all be rejected before reaching Databricks:</p>
+<pre><code>execute_sql_safe(query="DROP TABLE foo")          # → SqlNotAllowed
+execute_sql_safe(query="DELETE FROM foo")         # → SqlNotAllowed
+execute_sql_safe(query="UPDATE foo SET x=1")      # → SqlNotAllowed
+execute_sql_safe(query="GRANT SELECT ON foo TO bar")  # → SqlNotAllowed
+execute_sql_safe(query="SELECT * FROM foo; DROP TABLE bar")  # multi-stmt → SqlNotAllowed</code></pre>
+
+<p>Confirm each comes back as <code>{"error": {"type": "SqlNotAllowed", ...}}</code> rather than executing.</p>
+
+<h2><span class="phase-tag">PHASE 4</span>The audit log + tamper-evidence</h2>
+<pre><code># Point the server at a writable audit file.
+export MCP_AUDIT_LOG_PATH=/tmp/steward-audit.jsonl
+rm -f $MCP_AUDIT_LOG_PATH
+
+# Restart the stdio server so it picks up the env. Then run a few
+# tools from your client (Phase 3). When done, inspect the JSONL:
+cat $MCP_AUDIT_LOG_PATH | jq -c '{event, tool, request_id, seq, outcome}' | head -10</code></pre>
+
+<p>Pivot a single request through the log:</p>
+<pre><code># Pick any request_id from the file, then:
+RID=&lt;paste-request-id&gt;
+jq "select(.request_id == \"$RID\")" $MCP_AUDIT_LOG_PATH</code></pre>
+
+<p>You should see <code>tool.start</code> → (optional <code>tool.databricks_statement</code>) → <code>tool.end</code>, all sharing the same <code>request_id</code>. Take the <code>statement_id</code> from <code>tool.databricks_statement</code> and look it up in Databricks' <code>system.query.history</code> — you've now done the request_id → statement_id pivot the runbook describes.</p>
+
+<p><strong>Verify the chain:</strong></p>
+<pre><code>python -m mcp_server.audit_verify $MCP_AUDIT_LOG_PATH
+# Expect: chain intact: N record(s) verified</code></pre>
+
+<p><strong>Now tamper with it and confirm detection:</strong></p>
+<pre><code># Edit the first record's `tool` field by hand (any text editor) — keep
+# its seq/prev_hash/hash intact. Save, then:
+python -m mcp_server.audit_verify $MCP_AUDIT_LOG_PATH
+# Expect exit code 1, "hash mismatch"
+echo $?</code></pre>
+
+<p>Restore from a backup or delete and re-generate. You've now seen tamper-evidence from both sides.</p>
+
+<h2><span class="phase-tag">PHASE 5</span>HTTP transport + bearer auth + per-end-user identity</h2>
+<pre><code># Generate a bearer token + start over HTTP, loopback-only.
+export MCP_BEARER_TOKEN=$(openssl rand -hex 32)
+export MCP_BEARER_TOKEN_NAME=team-data
+python -m mcp_server.server --transport streamable-http --port 8765 &amp;
+SERVER_PID=$!
+sleep 2</code></pre>
+
+<p>Test the probe endpoints (no auth needed):</p>
+<pre><code>curl -s http://127.0.0.1:8765/healthz   # → ok
+curl -s http://127.0.0.1:8765/readyz    # → ready</code></pre>
+
+<p>Confirm the API surface refuses without the token:</p>
+<pre><code>curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8765/mcp
+# → 401
+curl -s -o /dev/null -w '%{http_code}\n' \
+  -H "Authorization: Bearer $MCP_BEARER_TOKEN" \
+  http://127.0.0.1:8765/mcp
+# → 200 (or 4xx on a missing session header — auth is what we're testing)</code></pre>
+
+<p>Confirm the <strong>external-bind refusal</strong>:</p>
+<pre><code>python -m mcp_server.server --transport streamable-http --host 0.0.0.0 --port 8765
+# Should refuse: "Refusing to bind '0.0.0.0': external bind requires --allow-external"</code></pre>
+
+<p>Stop the server: <code>kill $SERVER_PID</code>.</p>
+
+<p><strong>Per-end-user identity (X-End-User):</strong></p>
+<pre><code>export MCP_TRUST_END_USER_HEADER=1
+export MCP_END_USER_HEADER=X-Forwarded-User
+python -m mcp_server.server --transport streamable-http --port 8765 &amp;
+SERVER_PID=$!
+sleep 2
+
+# Drive a tool call with the header set — caller_id should pick it up.
+# Easiest path: write a small request via the MCP Inspector or use the
+# probe at stress/probe_http_auth.py (see Phase 6).
+kill $SERVER_PID
+unset MCP_TRUST_END_USER_HEADER MCP_END_USER_HEADER MCP_BEARER_TOKEN MCP_BEARER_TOKEN_NAME</code></pre>
+
+<p>Then check the audit log: <code>caller_id</code> should equal whatever the header carried, not <code>team-data</code>.</p>
+
+<h2><span class="phase-tag">PHASE 6</span>Reliability layer (stress probes)</h2>
+<p>These are the most fun part — each probe surfaces a specific real bug or verifies a specific guard. Run them one at a time and read the printout:</p>
+<pre><code># Throughput baseline — single session, configurable concurrency.
+python -m stress.load --concurrent 50 --total 1000
+
+# Async cancellation: probe_a1_leak shows the bug, probe_a1_fix_verify
+# confirms the fix.
+python -m stress.probe_a1_leak
+python -m stress.probe_a1_fix_verify
+
+# Sync-tool blast radius — why @safe_tool rejects sync defs by default.
+python -m stress.probe_d_blast_radius
+
+# Graceful drain on SIGTERM/SIGINT.
+python -m stress.probe_restart
+
+# SQL governance gate (real Databricks).
+python -m stress.probe_sql_governance
+
+# SQL cancellation propagation.
+python -m stress.probe_sql_cancellation
+
+# Soak — long-running real Databricks load, smoke-tests fd / RSS growth.
+python -m stress.probe_databricks_soak
+
+# HTTP transport probes.
+python -m stress.probe_http_auth
+python -m stress.probe_http_lifecycle
+python -m stress.probe_http_transport
+
+# MCP-specific threat probes (prompt injection, session confusion).
+python -m stress.probe_adversarial
+
+# Token-scrubbing probe — confirms tokens never appear in audit/error.
+python -m stress.probe_token_audit
+
+# Stdout-cleanliness — anything written to stdout other than JSON-RPC
+# corrupts the stdio session; this probe asserts nothing leaks.
+python -m stress.probe_stdout_clean</code></pre>
+
+<p>Each prints PASS/FAIL with a short narrative. <code>STRESS_FINDINGS.md</code> documents the bug each probe was originally written to reproduce.</p>
+
+<h2><span class="phase-tag">PHASE 7</span>Rate limiting + per-tool credentials</h2>
+
+<h3>Rate limiting</h3>
+<pre><code>export MCP_RATE_LIMIT='execute_sql_safe=2/60,*=50/60'
+export MCP_AUDIT_LOG_PATH=/tmp/rl-test.jsonl
+rm -f $MCP_AUDIT_LOG_PATH
+
+# Start server (stdio or HTTP), call execute_sql_safe three times.
+# The third call returns:
+#   {"error": {"type": "RateLimitExceeded", ...}}
+# Check the audit log:
+jq -c 'select(.event == "tool.rate_limit_exceeded")' $MCP_AUDIT_LOG_PATH</code></pre>
+
+<p>You should see one record per refusal carrying <code>limit: 2</code>, <code>window_s: 60</code>.</p>
+
+<h3>Per-tool credentials</h3>
+<pre><code># Default: every tool uses DATABRICKS_TOKEN.
+# Override one tool with its own PAT:
+export MCP_TOOL_TOKEN_LIST_CATALOGS=dapi&lt;another-token&gt;
+
+# Now `list_catalogs` runs as the second token's identity. The other
+# tools still use DATABRICKS_TOKEN. Verify by checking the
+# `mcp_caller=&lt;id&gt;` query_tag in `system.query.history` for an
+# execute_sql_safe call vs a list_catalogs call (they go through
+# different SDK clients).</code></pre>
+
+<h2><span class="phase-tag">PHASE 8</span>Telemetry (Prometheus + OpenTelemetry)</h2>
+
+<h3>Prometheus</h3>
+<pre><code>export MCP_PROMETHEUS_ENABLED=1
+python -m mcp_server.server --transport streamable-http --port 8765 &amp;
+SERVER_PID=$!
+sleep 2
+
+curl -s http://127.0.0.1:8765/metrics | head -30
+# Look for:
+#   mcp_tool_calls_total{tool="...",outcome="..."}
+#   mcp_tool_latency_ms_bucket{tool="..."}
+#   mcp_in_flight_tools
+
+# Drive a few tool calls, then re-fetch /metrics and watch counters move.
+kill $SERVER_PID</code></pre>
+
+<h3>OpenTelemetry traces (optional, needs a collector)</h3>
+<pre><code># Stand up an OTLP collector locally (Jaeger all-in-one is the easiest).
+docker run --rm -d --name jaeger -p 16686:16686 -p 4317:4317 \
+  jaegertracing/all-in-one:latest
+
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4317
+export OTEL_SERVICE_NAME=databricks-ai-steward
+python -m mcp_server.server --transport streamable-http --port 8765 &amp;
+sleep 2
+
+# Drive tool calls, then open Jaeger:
+open http://127.0.0.1:16686
+# Search for service `databricks-ai-steward`. Each tool call shows up
+# as a span with the same `request_id` you see in the audit log.
+
+kill %1
+docker stop jaeger</code></pre>
+
+<h2><span class="phase-tag">PHASE 9</span>Containerized + helm</h2>
+
+<h3>Docker Compose (single-host)</h3>
+<pre><code>docker compose -f deploy/docker-compose.yml up --build
+# In another terminal:
+curl -s http://127.0.0.1:8765/healthz   # → ok
+docker compose -f deploy/docker-compose.yml down</code></pre>
+
+<h3>Helm chart (template only — no cluster needed)</h3>
+<pre><code>helm lint deploy/helm/databricks-ai-steward
+helm template steward deploy/helm/databricks-ai-steward | less
+
+# With overrides — ingress on, oauth2-proxy + X-Forwarded-User wiring,
+# Prometheus, OTel, log-shipper sidecar:
+cat &gt; /tmp/values.yaml &lt;&lt;'EOF'
+secrets:
+  databricks: { secretName: dbx-creds }
+  bearer:     { secretName: steward-bearer }
+ingress:
+  enabled: true
+  hosts:
+    - host: steward.example.com
+      paths: [ { path: /, pathType: Prefix } ]
+config:
+  trustEndUserHeader: "1"
+  endUserHeader: X-Forwarded-User
+  bearerTokenName: team-data
+  prometheusEnabled: "1"
+networkPolicy:
+  databricks: { host: workspace.cloud.databricks.com }
+serviceMonitor: { enabled: true }
+EOF
+helm template steward deploy/helm/databricks-ai-steward -f /tmp/values.yaml | less</code></pre>
+
+<h3>Apply against a real cluster (optional)</h3>
+<pre><code>kubectl create secret generic dbx-creds \
+  --from-literal=host="$DATABRICKS_HOST" \
+  --from-literal=token="$DATABRICKS_TOKEN"
+kubectl create secret generic steward-bearer \
+  --from-literal=token=$(openssl rand -hex 32)
+
+helm install steward deploy/helm/databricks-ai-steward \
+  --set secrets.databricks.secretName=dbx-creds \
+  --set secrets.bearer.secretName=steward-bearer \
+  --set image.repository=ghcr.io/sherman94062/databricks-ai-steward \
+  --set image.tag=latest
+
+kubectl get pods -l app.kubernetes.io/name=databricks-ai-steward -w
+kubectl port-forward svc/steward-databricks-ai-steward 8765:8765
+# Hit http://127.0.0.1:8765/healthz from another terminal.</code></pre>
+
+<h2>What you'll have exercised by the end</h2>
+<table>
+<thead><tr><th>Phase</th><th>Subsystem</th><th>Key artifact you'll have seen</th></tr></thead>
+<tbody>
+<tr><td>1</td><td>Test surface</td><td>102 passing tests across 9 modules</td></tr>
+<tr><td>2</td><td>Stdio + Claude Code</td><td>Server registered, tools invokable from a real client</td></tr>
+<tr><td>3</td><td>Live tools + governance</td><td>Real catalogs / SQL / system tables; gate rejects DDL</td></tr>
+<tr><td>4</td><td>Audit log + chain</td><td><code>request_id</code> pivot + <code>audit_verify</code> detecting tampering</td></tr>
+<tr><td>5</td><td>HTTP + auth</td><td>Probes bypass auth; <code>/mcp</code> requires it; X-End-User propagates</td></tr>
+<tr><td>6</td><td>Reliability probes</td><td>14 probes, each surfacing a specific real bug or guard</td></tr>
+<tr><td>7</td><td>Rate limit + per-tool creds</td><td>Refusal record in audit; query_tags differ per tool</td></tr>
+<tr><td>8</td><td>Telemetry</td><td><code>/metrics</code> counters move; Jaeger spans share <code>request_id</code></td></tr>
+<tr><td>9</td><td>Deployment</td><td>Compose works; helm renders + applies cleanly</td></tr>
+</tbody>
+</table>
+
+<div class="callout">
+<strong>End state.</strong> Once you finish, you'll have hit every public surface of the project and seen the audit-trail-as-evidence story end-to-end. If a phase reveals something unexpected, the four reference docs cover almost everything: <code>RUNBOOK.md</code> for ops, <code>SECURITY.md</code> for the threat model, <code>AUDIT_LOG_SCHEMA.md</code> for the audit-log contract, <code>STRESS_FINDINGS.md</code> for what each probe was originally written to catch.
+</div>
+
+</body>
+</html>
