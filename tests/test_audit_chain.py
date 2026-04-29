@@ -15,6 +15,7 @@ import pytest
 
 from mcp_server import audit
 from mcp_server.audit_verify import GENESIS_HASH, verify
+from mcp_server.audit_verify import main as verify_main
 
 
 @pytest.fixture
@@ -163,3 +164,73 @@ def test_emitted_record_does_not_leak_arg_values_through_hash(audit_path):
     audit.emit_tool_start("secret_tool", "rid1", (), {"api_token": sentinel})
     text = audit_path.read_text()
     assert sentinel not in text
+
+
+# ---- audit_verify CLI -----------------------------------------------------
+# The verify() function is exercised above; these cover the thin main()
+# wrapper around it: argparse, exit-code routing, and the stdout-vs-stderr
+# split (success-on-stdout, failure-on-stderr) so an operator can pipe
+# `audit_verify` cleanly inside a CronJob without losing the failure
+# message to /dev/null.
+
+
+def test_cli_exit_0_on_clean_chain_writes_to_stdout(audit_path, capsys):
+    audit.emit_tool_start("foo", "rid1", (), {})
+    audit.emit_tool_end("foo", "rid1", 1.0, "success")
+    code = verify_main([str(audit_path)])
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "chain intact" in captured.out
+    assert captured.err == ""
+
+
+def test_cli_exit_1_on_tampered_file_writes_to_stderr(audit_path, capsys):
+    audit.emit_tool_start("foo", "rid1", (), {})
+    audit.emit_tool_end("foo", "rid1", 1.0, "success")
+    lines = audit_path.read_text().splitlines()
+    rec = json.loads(lines[0])
+    rec["tool"] = "evil"
+    lines[0] = json.dumps(rec)
+    audit_path.write_text("\n".join(lines) + "\n")
+
+    code = verify_main([str(audit_path)])
+    captured = capsys.readouterr()
+    assert code == 1
+    assert "hash mismatch" in captured.err
+    assert captured.out == ""
+
+
+def test_cli_exit_2_on_missing_file_writes_to_stderr(tmp_path, capsys):
+    code = verify_main([str(tmp_path / "does-not-exist.jsonl")])
+    captured = capsys.readouterr()
+    assert code == 2
+    assert "cannot open" in captured.err
+    assert captured.out == ""
+
+
+def test_cli_exit_2_on_v1_log_writes_to_stderr(tmp_path, capsys):
+    """A v1 log without chain fields should fail loudly via the CLI
+    too — operators relying on `if audit_verify; then ship; fi` need
+    a non-zero exit, not a false-pass."""
+    p = tmp_path / "v1.jsonl"
+    p.write_text(
+        json.dumps({
+            "event": "tool.start", "tool": "foo", "ts": 1.0,
+            "request_id": "rid1", "caller_id": "x",
+        }) + "\n"
+    )
+    code = verify_main([str(p)])
+    captured = capsys.readouterr()
+    assert code == 2
+    assert ("v1" in captured.err) or ("chain field" in captured.err)
+    assert captured.out == ""
+
+
+def test_cli_argparse_rejects_missing_path():
+    """No positional arg → argparse exits 2 (Python convention) with
+    a usage message on stderr. Sanity-check that the CLI surface
+    really uses argparse and isn't silently treating no-args as a
+    valid invocation."""
+    with pytest.raises(SystemExit) as exc:
+        verify_main([])
+    assert exc.value.code == 2  # argparse's "usage error" exit code
