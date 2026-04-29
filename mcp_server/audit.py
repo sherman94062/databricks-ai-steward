@@ -26,12 +26,90 @@ import json
 import logging
 import os
 import sys
+import threading
 import time
 import uuid
 from pathlib import Path
 from typing import Any
 
 _log = logging.getLogger("mcp_server.audit")
+
+# ---- Hash-chain (tamper-evidence) -------------------------------------
+# Every record gets `seq` (monotonic) + `prev_hash` (previous record's
+# hash) + `hash` (SHA-256 over the canonical-JSON of this record minus
+# the `hash` field itself). A verifier walking the file can detect any
+# insert / edit / delete after the fact. No keys, no signing — just
+# collision-resistance. Forge resistance is *not* a goal; for that, pair
+# with HMAC and a key the steward never sees client-side.
+#
+# Schema is v2 (see AUDIT_LOG_SCHEMA.md). Previously-written v1 logs
+# (no chain fields) won't verify under this CLI — they remain readable,
+# they're just not tamper-evident.
+
+GENESIS_HASH = "0" * 64
+
+_chain_lock = threading.Lock()
+_seq = 0
+_last_hash = GENESIS_HASH
+_chain_initialized = False
+
+
+def _canonical(record: dict) -> bytes:
+    return json.dumps(
+        record, sort_keys=True, separators=(",", ":"), default=str,
+    ).encode("utf-8")
+
+
+def _recover_chain_from_file(path: Path) -> None:
+    """Read the existing audit file (if any) and resume the chain from
+    its tail. Lets a restarted process continue an unbroken chain
+    instead of resetting to genesis (which would be a verifier-detectable
+    discontinuity)."""
+    global _seq, _last_hash
+    try:
+        if not path.exists() or path.stat().st_size == 0:
+            return
+        last_seq = 0
+        last_hash = GENESIS_HASH
+        with path.open() as f:
+            for raw in f:
+                line = raw.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if "seq" in rec and "hash" in rec:
+                    last_seq = rec["seq"]
+                    last_hash = rec["hash"]
+        _seq = last_seq
+        _last_hash = last_hash
+    except OSError:
+        # If the file is unreadable we'd rather start a new chain than
+        # crash the server. The verifier will surface the discontinuity.
+        pass
+
+
+def _ensure_chain_initialized() -> None:
+    global _chain_initialized
+    if _chain_initialized:
+        return
+    path = os.environ.get("MCP_AUDIT_LOG_PATH", "").strip()
+    if path:
+        _recover_chain_from_file(Path(path).expanduser())
+    _chain_initialized = True
+
+
+def _link_record(record: dict) -> None:
+    """Mutate `record` in place: assign seq, prev_hash, hash. Caller
+    must hold `_chain_lock`."""
+    global _seq, _last_hash
+    _seq += 1
+    record["seq"] = _seq
+    record["prev_hash"] = _last_hash
+    record["hash"] = hashlib.sha256(_canonical(record)).hexdigest()
+    _last_hash = record["hash"]
 
 # Caller identity for the *current* in-flight request. Transport layers
 # (stdio entry, bearer-auth middleware) overwrite this per-call; tools
@@ -142,30 +220,39 @@ def _emit(record: dict) -> None:
     record.setdefault("ts", round(time.time(), 3))
     record.setdefault("caller_id", current_caller_id())
 
+    # Capture mode is test-only. Skip chain linking so existing tests
+    # aren't sensitive to chain state leaking across the test session.
+    # Tests that need to exercise the chain use a real file path.
     if _capture is not None:
         _capture.append(record)
         return
 
-    line = json.dumps(record, default=str)
+    # Hold the chain lock through the file write so that physical file
+    # order matches `seq` order even under concurrent emits. (The whole
+    # path is sync; awaiting inside the lock isn't a concern.)
+    with _chain_lock:
+        _ensure_chain_initialized()
+        _link_record(record)
+        line = json.dumps(record, default=str)
 
-    path = os.environ.get("MCP_AUDIT_LOG_PATH", "").strip()
-    if path:
-        try:
-            p = Path(path).expanduser()
-            p.parent.mkdir(parents=True, exist_ok=True)
-            with p.open("a") as f:
-                f.write(line + "\n")
-        except OSError as e:
-            # Don't let audit-log write failures break the server. Surface
-            # via a stderr warning so operators see the problem.
-            _log.warning("audit log write failed: %s", e)
+        path = os.environ.get("MCP_AUDIT_LOG_PATH", "").strip()
+        if path:
+            try:
+                p = Path(path).expanduser()
+                p.parent.mkdir(parents=True, exist_ok=True)
+                with p.open("a") as f:
+                    f.write(line + "\n")
+            except OSError as e:
+                # Don't let audit-log write failures break the server. Surface
+                # via a stderr warning so operators see the problem.
+                _log.warning("audit log write failed: %s", e)
 
-    # Always emit to stderr at INFO so logs collectors capture audit
-    # even when the file path isn't configured. Suppress when
-    # MCP_AUDIT_DISABLE_STDERR=1 (useful in noisy CI / log shippers
-    # that already pull from the file).
-    if os.environ.get("MCP_AUDIT_DISABLE_STDERR", "").strip() not in ("1", "true", "yes"):
-        print(line, file=sys.stderr, flush=True)
+        # Always emit to stderr at INFO so logs collectors capture audit
+        # even when the file path isn't configured. Suppress when
+        # MCP_AUDIT_DISABLE_STDERR=1 (useful in noisy CI / log shippers
+        # that already pull from the file).
+        if os.environ.get("MCP_AUDIT_DISABLE_STDERR", "").strip() not in ("1", "true", "yes"):
+            print(line, file=sys.stderr, flush=True)
 
 
 class capture:

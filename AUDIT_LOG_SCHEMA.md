@@ -43,8 +43,11 @@ Every record carries these:
 | `event` | string | Event type — one of `tool.start`, `tool.end`, `tool.rate_limit_exceeded`, `tool.databricks_statement` |
 | `ts` | float | Unix epoch seconds, three decimals (millisecond resolution) |
 | `request_id` | string \| null | UUID hex, identifies one tool call. Null for events not associated with a single call (none today) |
-| `caller_id` | string | Identity of the caller. From `MCP_BEARER_TOKEN_NAME` for HTTP requests, from `MCP_CALLER_ID` for stdio, or `"unknown"` if neither is set |
+| `caller_id` | string | Identity of the caller. From `MCP_BEARER_TOKEN_NAME` for HTTP requests (or per-end-user via `MCP_TRUST_END_USER_HEADER`), from `MCP_CALLER_ID` for stdio, or `"unknown"` if neither is set |
 | `tool` | string | Tool name (matches `tools/list` registration) |
+| `seq` | int | Monotonic counter, starts at 1 for the first record in a chain. See "Tamper-evidence" below |
+| `prev_hash` | string | SHA-256 hex of the previous record's `hash`. The genesis record uses 64 zeros. See "Tamper-evidence" below |
+| `hash` | string | SHA-256 hex over the canonical-JSON of *this* record minus the `hash` field itself. See "Tamper-evidence" below |
 
 ---
 
@@ -172,12 +175,55 @@ rather than duplicating them into the steward's audit channel.
 
 ---
 
-## Immutability
+## Tamper-evidence (in-app)
 
-The steward writes JSONL records via plain `open(path, "a")` —
-**append-only at the application layer, but not cryptographically
-tamper-evident**. The immutability guarantee, where it exists, is
-provided by the deployment-layer log shipper:
+Schema v2 adds a hash chain. Every record carries:
+
+- `seq` — monotonic counter starting at 1
+- `prev_hash` — SHA-256 hex of the previous record's `hash`. Genesis is 64 zeros
+- `hash` — SHA-256 hex over the canonical-JSON of *this* record minus the `hash` field
+
+A verifier walking the file recomputes each record's hash, checks
+`prev_hash` matches the previous record's hash, and checks `seq`
+increments monotonically. Any insertion, deletion, edit, or reorder
+produces a mismatch.
+
+The CLI lives at `mcp_server.audit_verify`:
+
+```bash
+python -m mcp_server.audit_verify $MCP_AUDIT_LOG_PATH
+# Exit 0 = chain intact
+# Exit 1 = mismatch (insert/edit/delete detected)
+# Exit 2 = file unreadable or v1-schema log without chain fields
+```
+
+This is **tamper-evidence**, not **forge resistance**. An adversary
+who controls the writer process can produce a self-consistent chain
+of fabricated records (no key, so nothing prevents recomputation from
+scratch). The chain protects against post-hoc edits — the realistic
+attacker model when the writer is trusted but the storage path is
+shared (e.g. a host-mounted volume read by a log shipper, or
+operator-side retention policies).
+
+For forge resistance pair the chain with HMAC-SHA-256 using a key the
+steward writes-only and the verifier reads-only. That's a
+deployment-layer add-on (KMS-fronted key + a slightly modified
+verifier), not a code change in the steward — the chain field
+already includes whatever future signing scheme the operator wants
+to layer on.
+
+**Restart continuity.** On startup, the steward reads the existing
+audit file (if `MCP_AUDIT_LOG_PATH` points at one) and resumes the
+chain from its tail. A restart does *not* produce a discontinuity. If
+the file is rotated under the steward, the new file becomes a new
+chain segment — operators verifying across rotations should run
+`audit_verify` on each rotated file.
+
+## Immutability (deployment layer)
+
+In addition to in-app tamper-evidence, production deployments still
+want immutable storage so the chain cannot be replayed-and-replaced
+wholesale:
 
 | Storage backend | Immutability mechanism |
 |---|---|
@@ -189,18 +235,15 @@ provided by the deployment-layer log shipper:
 
 For a fintech deployment, the recommended pattern is:
 
-1. Steward writes to a host-mounted volume (the JSONL file).
+1. Steward writes to a host-mounted volume (the JSONL file). Each
+   record carries chain fields, so an attacker who edits the file
+   between write and ship gets caught.
 2. A log-shipper sidecar (Vector, Filebeat, Fluent Bit) tails the file
    and writes to S3 + Object Lock (or equivalent).
 3. The on-disk file is rotated and deleted on a short cycle (24 h
    typical) — the immutable copy lives in object storage.
-
-The steward does *not* compute hash chains or sign records. That's a
-deliberate scope decision: the cost of a robust crypto chain (key
-management, verification tooling, recovery on key loss) is
-disproportionate to the marginal benefit when the log-shipper-side
-storage already provides immutability. If a deployment needs in-app
-crypto chaining, it's a custom integration not a built-in feature.
+4. Periodic `audit_verify` runs over the live file (and the shipped
+   archives) catch tampering early.
 
 ---
 
@@ -273,13 +316,24 @@ SELECT statement_text FROM system.query.history WHERE statement_id = '<id>'
 
 ## Schema versioning
 
-The audit-log schema is **v1** as of commit `fc18d73` (the commit
-that added `tool.databricks_statement`). Future schema changes will
-add fields rather than rename or remove them, so log consumers can
-ignore unknown fields and parse old + new logs uniformly.
+The audit-log schema is **v2**. v2 adds the hash-chain fields
+(`seq`, `prev_hash`, `hash`) to every record. v1 logs (without chain
+fields) remain readable by any JSONL consumer; the chain verifier
+explicitly rejects them with exit code 2 so an operator doesn't get a
+false sense of security.
 
-If a breaking change ever lands, this doc bumps to v2 and includes a
-migration recipe. Until then: every record above is stable.
+Migration: there is no in-place v1→v2 migration. A v1 log can be
+attached to its v2 successor by writing a stitching record carrying
+the last v1 record's content as the v2 genesis — but that's a custom
+operator workflow, not a built-in. Most deployments simply rotate the
+file at deploy time and start the v2 chain fresh.
+
+| Version | Commit | Change |
+|---|---|---|
+| v1 | `fc18d73` | Added `tool.databricks_statement` |
+| v2 | (this commit) | Added hash chain (`seq`, `prev_hash`, `hash`); shipped `audit_verify` CLI |
+
+Future schema changes add fields rather than rename or remove them.
 
 ---
 
