@@ -14,6 +14,7 @@ dependencies = [
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
+    "pytest-cov>=5.0",
     # Required by stress/probe_langchain_compat.py — verifies the
     # langchain-ai/langchain-mcp-adapters wrapper can load our tools.
     "langchain-mcp-adapters>=0.1",
@@ -93,3 +94,38 @@ exclude = [
 # bandit's default skipset; we suppress findings inline with `# nosec` and
 # a comment explaining why. Don't scan tests / probes / venv.
 exclude_dirs = ["tests", "stress", ".venv"]
+
+[tool.pytest.ini_options]
+# Default to coverage on every `pytest tests/` run. Override locally
+# with `pytest --no-cov` if iterating on a single test and the
+# coverage overhead is annoying.
+addopts = [
+    "--cov=mcp_server",
+    "--cov-report=term-missing",
+    "--cov-report=html",
+]
+
+[tool.coverage.run]
+source = ["mcp_server"]
+branch = true
+omit = [
+    # Empty package markers — nothing to measure.
+    "mcp_server/__init__.py",
+    "mcp_server/databricks/__init__.py",
+    "mcp_server/tools/__init__.py",
+]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+# Lines that don't count as "uncovered" — they're either unreachable,
+# defensive, or only fired by static type checkers.
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+]
+
+[tool.coverage.html]
+directory = "htmlcov"

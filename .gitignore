@@ -11,3 +11,9 @@ __pycache__/
 
 # CI / security artifacts (generated, not committed)
 sbom.json
+
+# pytest-cov artifacts
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
